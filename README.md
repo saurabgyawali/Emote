@@ -301,26 +301,49 @@ cd Emote/emotion_analysis && .venv/bin/python -m pytest -q tests
 
 ## 📦 Moving to the Jetson
 
-**If the Jetson has internet (it does — the installer reaches PyPI), use git.** Push this repo
-once, clone it on the Jetson, and from then on `bash go.sh` pulls each update by itself:
-
-```bash
-# on the Jetson, once
-cd ~/Developer/RASL && git clone <your repo url> Emote
-cd Emote/transcriber && bash install.sh
-
-# every time after that
-cd ~/Developer/RASL/Emote && bash go.sh
-```
-
-Weights, the CTranslate2 tree, sessions, and logs are all gitignored, so a `git pull` moves
-only code and never touches the ~12 GB of artifacts already on the device.
-
-**Without a network**, carry a tarball instead:
+The server and the Jetson are not networked to each other, so code crosses by hand. One
+command builds exactly what to carry:
 
 ```bash
 cd Emote
-bash go.sh copy                 # = pack.sh --with-model
+bash go.sh copy                 # -> ../Emote-to-copy/  (code only, ~220 KB, 42 files)
+bash go.sh copy --tar           # -> ../Emote-<date>.tar.gz including the model
+```
+
+### The round trip
+
+| # | Where | Action |
+|---|---|---|
+| 1 | Server | `bash go.sh copy` → `../Emote-to-copy/` |
+| 2 | Your computer | Download that folder |
+| 3 | Jetson | Drop it **on top of** `~/Developer/RASL/Emote`, merge/replace |
+| 4 | Jetson | `cd ~/Developer/RASL/Emote && bash go.sh` |
+| 5 | Your computer | Take the one tarball it names at the end |
+| 6 | Server | Drop it in `incoming/` |
+
+If the Jetson ever gets this repo directly (it does have internet — the installer reaches
+PyPI), `bash go.sh update` will `git pull` instead and steps 1–3 disappear.
+
+Drop `Emote-to-copy/` **on top of** the Jetson's `Emote` folder and choose Merge/Replace.
+Never delete that folder first: the model, the venv, the CUDA build and past logs live there
+and are deliberately not in the copy.
+
+### Bringing results back
+
+`bash go.sh` ends by printing the path of a single file:
+
+```
+transcriber/diagnostics_<hostname>_<timestamp>.tar.gz
+```
+
+Drag that one file back and drop it in this repo's `incoming/` folder. It contains the run
+logs, the health report, session transcripts and metadata, and the system, audio, CUDA and
+kernel facts. Audio is excluded unless you run `bash go.sh logs --with-audio`.
+`incoming/` is gitignored, so nothing dropped there is ever committed.
+
+Lower-level packing:
+
+```bash
 bash pack.sh                    # -> ../Emote-<date>.tar.gz, clean
 bash pack.sh --with-model       # ...including the Whisper weights, so the Jetson need not download them
 bash pack.sh --with-ct2-src     # ...including the 11 GB CTranslate2 source tree (rarely wanted)

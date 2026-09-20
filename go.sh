@@ -60,18 +60,29 @@ step_check() {
 step_record() {
   say "Recording a session"
   info "Speak when it says it is listening. Press Enter or Ctrl+C to stop and save."
-  bash "$TRANSCRIBER/run.sh" "${RUN_ARGS[@]}"
+  bash "$TRANSCRIBER/run.sh" ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}
 }
 
 step_logs() {
   say "Bundling the logs"
-  bash "$TRANSCRIBER/scripts/collect_diagnostics.sh"
-  info "Copy that tarball to whoever is debugging this."
+  bash "$TRANSCRIBER/scripts/collect_diagnostics.sh" "$@"
+  local bundle
+  bundle="$(ls -t "$TRANSCRIBER"/diagnostics_*.tar.gz 2>/dev/null | head -1)"
+  if [ -n "$bundle" ]; then
+    printf '\n\033[1m==> Bring this ONE file back\033[0m\n'
+    info "$bundle"
+    info ""
+    info "Drag it off this machine and drop it in the project's  incoming/  folder."
+    info "It holds the logs, health report, transcripts and system facts -- but no audio."
+    info "Need the recordings too? Re-run: bash go.sh logs --with-audio"
+  else
+    warn "No diagnostics tarball was produced; see the output above."
+  fi
 }
 
 step_features() {
   say "Extracting features from the sessions already recorded"
-  bash "$HERE/run_pipeline.sh" --no-record "${RUN_ARGS[@]}"
+  bash "$HERE/run_pipeline.sh" --no-record ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}
 }
 
 step_copy() {
@@ -110,7 +121,7 @@ case "$STEP" in
   update)   step_update ;;
   check)    step_check ;;
   record)   step_record ;;
-  logs)     step_logs ;;
+  logs)     step_logs ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} ;;
   features) step_features ;;
   copy)     step_copy ;;
   session)

@@ -11,8 +11,12 @@ session folder as run.log) containing: environment, full config, device
 discovery, sample-rate probing, a heartbeat every few seconds (mic level,
 queue depth, VAD activity, overflow counts), one line per utterance with
 Whisper's confidences, and a final summary. Any worker exception is logged
-with its traceback and stops the run cleanly. Stop with Enter / q / Ctrl+C /
-SIGTERM; the session folder is always kept.
+with its traceback and stops the run cleanly. Stop with Esc / Enter / q /
+Ctrl+C / SIGTERM; the session folder is always kept.
+
+Console output has two modes: the default shows the INFO log (and DEBUG with
+--verbose), while --quiet shows only the transcript lines. Both write the same
+full DEBUG log to disk.
 """
 
 from __future__ import annotations
@@ -20,7 +24,9 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import logging
+import os
 import queue
+import select
 import shutil
 import signal
 import sys
@@ -69,8 +75,9 @@ def log_config(config: Config) -> None:
 
 
 class Pipeline:
-    def __init__(self, config: Config, session_name: str | None = None) -> None:
+    def __init__(self, config: Config, session_name: str | None = None, quiet: bool = False) -> None:
         self.config = config
+        self.quiet = quiet
         self.params = build_utterance_params(config)
         logger.debug(
             "Utterance params: frame=%d ms (%d samples, %d bytes), start after %d speech frames, "
@@ -81,6 +88,9 @@ class Pipeline:
         )
         self.stop_event = threading.Event()
         self.failed = False
+        # In quiet mode the console shows no log lines, so the transcript must print
+        # regardless of config; it is the only thing the user would otherwise see.
+        self.print_text = config.print_transcript or self.quiet
         self.audio_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=config.input_queue_max_blocks)
         self.utterance_queue: "queue.Queue[tuple[Utterance, float]]" = queue.Queue()
         self.context = ContextWindow(config.context_enabled, config.context_max_chars)
@@ -138,7 +148,7 @@ class Pipeline:
             result=result,
             dropped_reason=reason,
             save_clip=self.config.save_clips,
-            print_text=self.config.print_transcript,
+            print_text=self.print_text,
         )
         if reason is None:
             self.context.add(result.text)
@@ -327,7 +337,10 @@ class Pipeline:
         t_start = time.monotonic()
         try:
             capture.start()
-            logger.info("Session %s running. %s", self.session.name, "Press Enter or type q to stop; Ctrl+C also works." if interactive else "Stop with Ctrl+C or SIGTERM.")
+            hint = "Press Esc or Enter to stop (q and Ctrl+C also work)." if interactive else "Stop with Ctrl+C or SIGTERM."
+            logger.info("Session %s running. %s", self.session.name, hint)
+            if self.quiet:
+                print(f"Listening. {hint} Transcript:", flush=True)
             while not self.stop_event.is_set():
                 time.sleep(0.2)
         except AudioDeviceError as exc:
@@ -352,15 +365,60 @@ class Pipeline:
             logger.warning("Transcription worker did not finish in time; some utterances were not saved.")
 
     def _control_loop(self) -> None:
-        try:
-            for line in sys.stdin:
-                if line.strip().lower() in ("", "q", "quit", "stop", "exit"):
-                    break
-                logger.info("Unknown command %r. Press Enter or type q to stop.", line.strip())
-        except Exception as exc:  # noqa: BLE001 - stdin closed
-            logger.debug("control loop ended: %s", exc)
-        logger.info("Stop requested from console.")
+        if self._read_stop_key():
+            logger.info("Stop requested from console.")
         self.stop_event.set()
+
+    def _read_stop_key(self) -> bool:
+        """Block until the user asks to stop. True if they did, False if stdin died.
+
+        On a terminal this reads single keypresses so Esc alone stops the run;
+        line mode (a pipe, nohup) still works but needs Enter.
+        """
+        try:
+            import termios
+            import tty
+
+            fd = sys.stdin.fileno()
+            interactive = sys.stdin.isatty()
+        except Exception:  # noqa: BLE001 - no stdin at all
+            interactive = False
+
+        if not interactive:
+            try:
+                for line in sys.stdin:
+                    if line.strip().lower() in ("", "q", "quit", "stop", "exit"):
+                        return True
+                    logger.info("Unknown command %r. Press Enter or type q to stop.", line.strip())
+            except Exception as exc:  # noqa: BLE001 - stdin closed
+                logger.debug("control loop ended: %s", exc)
+            return False
+
+        saved = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            while not self.stop_event.is_set():
+                if not select.select([fd], [], [], 0.2)[0]:
+                    continue
+                key = os.read(fd, 1)
+                if not key:
+                    return False
+                if key == b"\x1b":
+                    # Esc alone stops; an escape sequence (arrow key, mouse) does not.
+                    if select.select([fd], [], [], 0.05)[0]:
+                        os.read(fd, 16)
+                        continue
+                    return True
+                if key in (b"\r", b"\n", b"q", b"Q", b"\x03"):
+                    return True
+        except Exception as exc:  # noqa: BLE001 - terminal went away
+            logger.debug("control loop ended: %s", exc)
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+            except Exception:  # noqa: BLE001
+                pass
+        return False
 
     def _finish(self) -> None:
         self._log_summary()
@@ -487,13 +545,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--list-devices", action="store_true", help="List input devices and exit.")
     p.add_argument("--doctor", action="store_true", help="Print an environment health report and exit.")
     p.add_argument("--verbose", "-v", action="store_true", help="Show DEBUG log lines on the console too (they are always in logs/run_*.log).")
+    p.add_argument("--quiet", "-q", action="store_true", help="Print only the transcript; no log lines on the console (logs/run_*.log is unchanged).")
     p.add_argument("--version", action="version", version=f"transcriber {__version__}")
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    run_log = setup_logging(PROJECT_DIR / "logs", verbose=args.verbose)
+    run_log = setup_logging(PROJECT_DIR / "logs", verbose=args.verbose, console=not args.quiet)
     logger.info("transcriber %s starting: argv=%s", __version__, sys.argv[1:] if argv is None else argv)
     logger.info("Full DEBUG log for this run: %s", run_log)
     rc = 1
@@ -525,7 +584,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     log_environment(logger)
     config = load_config(args.config)
     log_config(config)
-    pipeline = Pipeline(config, session_name=args.name or (Path(args.wav).stem if args.wav else None))
+    pipeline = Pipeline(config, session_name=args.name or (Path(args.wav).stem if args.wav else None), quiet=args.quiet)
     if args.wav:
         wav_path = Path(args.wav)
         if not wav_path.exists():

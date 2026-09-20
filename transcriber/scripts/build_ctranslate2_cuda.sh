@@ -98,6 +98,30 @@ export CUDA_HOME PATH="$CUDA_HOME/bin:$PATH" LD_LIBRARY_PATH="$CUDA_HOME/lib64:$
 
 WHEEL_DIR="$BUILD_ROOT/wheels"
 SRC="$BUILD_ROOT/CTranslate2"
+
+# The C++ library is installed system-wide by `sudo make install` and survives
+# everything that happens to the build tree -- including moving it, which breaks
+# the tree (CMake caches absolute paths) but not the installed library.
+installed_cpp_version() {
+  local so
+  so="$(ls /usr/local/lib/libctranslate2.so.[0-9]*.[0-9]*.[0-9]* 2>/dev/null | head -1)"
+  [ -n "$so" ] || return 1
+  basename "$so" | sed 's/^libctranslate2\.so\.//'
+}
+CPP_VERSION="$(installed_cpp_version || true)"
+CPP_READY="no"
+if [ -n "$CPP_VERSION" ] && [ "$CPP_VERSION" = "${CT2_VERSION#v}" ] && [ -d /usr/local/include/ctranslate2 ]; then
+  CPP_READY="yes"
+fi
+
+# A build tree records its own absolute path; moved, every generated Makefile points
+# at a directory that no longer exists and `make` dies on cmake_check_build_system.
+build_tree_relocated() {
+  local cached
+  [ -f "$SRC/build/CMakeCache.txt" ] || return 1
+  cached="$(grep -m1 '^CMAKE_HOME_DIRECTORY:' "$SRC/build/CMakeCache.txt" | cut -d= -f2-)"
+  [ -n "$cached" ] && [ "$cached" != "$SRC" ]
+}
 PYTAG="$("$PYTHON" -c 'import sys;print(f"cp{sys.version_info[0]}{sys.version_info[1]}")')"
 EXISTING_WHEEL="$(ls -t "$WHEEL_DIR"/ctranslate2-*-"$PYTAG"-*.whl 2>/dev/null | head -1 || true)"
 
@@ -110,11 +134,17 @@ info "memory      : $(free -m | awk '/Mem:/ {print $7 " MB available"}')   disk 
 info "CTranslate2 : $CT2_VERSION   CUDA: $CUDA_HOME   arch: $CUDA_ARCH"
 info "Python      : $PYTHON ($("$PYTHON" -V 2>&1))"
 info "Build root  : $BUILD_ROOT"
+info "C++ library : ${CPP_VERSION:-not installed} in /usr/local$([ "$CPP_READY" = "yes" ] && echo "  (matches $CT2_VERSION -- no C++ build needed)")"
 if [ "$CLEAN" = "no" ] && [ -n "$EXISTING_WHEEL" ]; then
   info "Found built wheel: $EXISTING_WHEEL  (will install it, no compile)"
-elif [ "$CLEAN" = "no" ] && [ -f "$SRC/build/libctranslate2.so" ]; then
+elif [ "$CLEAN" = "no" ] && [ "$CPP_READY" = "yes" ]; then
+  info "Only the Python binding needs building (a few minutes)"
+elif [ "$CLEAN" = "no" ] && [ -f "$SRC/build/libctranslate2.so" ] && ! build_tree_relocated; then
   info "Found compiled library in $SRC/build (will install it, no compile)"
 else
+  if build_tree_relocated; then
+    info "Existing build tree was configured for another path and cannot be reused"
+  fi
   info "Full compile needed (~30-45 min on Orin Nano, -j$JOBS)"
 fi
 confirm "Proceed?" || { echo "Aborted -- nothing changed."; exit 0; }
@@ -151,7 +181,14 @@ else
 fi
 
 # ---- compile ------------------------------------------------------------------------------
-if [ "$CLEAN" = "yes" ] || [ ! -f "$SRC/build/libctranslate2.so" ]; then
+if [ "$CLEAN" = "no" ] && [ "$CPP_READY" = "yes" ]; then
+  say "3-4) C++ library $CPP_VERSION already installed in /usr/local -- skipping the compile"
+  info "Only the Python binding is missing from $PYTHON."
+elif [ "$CLEAN" = "yes" ] || [ ! -f "$SRC/build/libctranslate2.so" ] || build_tree_relocated; then
+  if build_tree_relocated; then
+    info "Discarding $SRC/build: it was configured for a different path (CMake caches absolute paths)."
+    rm -rf "$SRC/build"
+  fi
   say "3) Configure + compile (-j$JOBS)"
   rm -rf "$SRC/build"; mkdir -p "$SRC/build"; cd "$SRC/build"
   cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_CUDA=ON -DWITH_CUDNN=ON -DWITH_MKL=OFF \
@@ -173,8 +210,10 @@ else
   info "incremental build took $(( ($(date +%s) - T0) )) s"
 fi
 
-say "4) Install C++ library"
-(cd "$SRC/build" && sudo make install >/dev/null && sudo ldconfig)
+if [ "$CPP_READY" != "yes" ]; then
+  say "4) Install C++ library"
+  (cd "$SRC/build" && sudo make install >/dev/null && sudo ldconfig)
+fi
 
 say "5) Build + install Python binding"
 cd "$SRC/python"

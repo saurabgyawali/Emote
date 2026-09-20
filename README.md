@@ -250,6 +250,7 @@ collects the diagnostics tarball when you stop. Each step can be run on its own:
 | `bash go.sh update` | `git pull --ff-only`, or tells you how to get the code across. |
 | `bash go.sh check` | Health report (`run.sh --doctor`). |
 | `bash go.sh record` | A recording session only. |
+| `bash go.sh --quiet` | The full loop, but only the transcript on screen while recording. |
 | `bash go.sh logs` | Diagnostics tarball only. |
 | `bash go.sh features` | Feature extraction over the sessions already recorded. |
 | `bash go.sh copy` | Tarball for a machine with no network. |
@@ -260,7 +261,9 @@ collects the diagnostics tarball when you stop. Each step can be run on its own:
 cd Emote/transcriber
 bash run.sh --list-devices      # find the mic; put a name substring in config.toml
 bash run.sh --doctor            # environment health report
-bash run.sh                     # talk; Enter / q / Ctrl+C stops and saves everything
+bash run.sh                     # talk; Esc / Enter / q / Ctrl+C stops and saves everything
+bash run.sh --quiet             # transcript lines only on screen
+bash run.sh --verbose           # full DEBUG log on screen
 bash run.sh --name interview    # label the session folder
 ```
 

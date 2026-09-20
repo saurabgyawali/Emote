@@ -2,12 +2,14 @@
 # The one command for a recording session. Run it on the Jetson:
 #
 #   bash go.sh                 # update the code, check the machine, record, bundle the logs
+#   bash go.sh --quiet         # ...showing only the transcript while recording
 #   bash go.sh --name demo1    # ...and label the session folder
 #   bash go.sh --wav clip.wav  # ...over an audio file instead of the microphone
 #
 # Individual steps, when you want just one:
 #
 #   bash go.sh update     # git pull (or tell you how to copy the code across)
+#   bash go.sh install    # create/repair the virtualenv, CUDA CTranslate2 and the model
 #   bash go.sh check      # health report only
 #   bash go.sh record     # recording session only
 #   bash go.sh logs       # diagnostics tarball only
@@ -28,8 +30,8 @@ die()  { printf '\n\033[31mStopped: %s\033[0m\n' "$*" >&2; exit 1; }
 
 STEP="session"
 case "${1:-}" in
-  update|check|record|logs|features|copy) STEP="$1"; shift ;;
-  -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+  update|install|check|record|logs|features|copy) STEP="$1"; shift ;;
+  -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
 esac
 RUN_ARGS=("$@")
 
@@ -52,6 +54,20 @@ step_update() {
   fi
 }
 
+# The venv holds the CUDA ctranslate2 build; without it nothing runs. It is absent
+# after a fresh clone, and after an Emote folder is replaced rather than merged.
+venv_missing() {
+  local venv="$TRANSCRIBER/.venv"
+  [ -f "$TRANSCRIBER/.venv_path" ] && venv="$(cat "$TRANSCRIBER/.venv_path")"
+  [ ! -x "$venv/bin/python" ]
+}
+
+step_install() {
+  say "Installing (venv, requirements, CUDA CTranslate2, model)"
+  info "First time on this machine this takes a while. Re-runs skip what is already done."
+  bash "$TRANSCRIBER/install.sh" ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}
+}
+
 step_check() {
   say "Checking this machine"
   bash "$TRANSCRIBER/run.sh" --doctor
@@ -59,7 +75,10 @@ step_check() {
 
 step_record() {
   say "Recording a session"
-  info "Speak when it says it is listening. Press Enter or Ctrl+C to stop and save."
+  info "Speak when it says it is listening."
+  info "Press Esc (or Enter) to stop: the session is saved and the logs are bundled"
+  info "up to that point -- stopping early never loses what was already transcribed."
+  info "Add --quiet for transcript-only output, --verbose for the full DEBUG log."
   bash "$TRANSCRIBER/run.sh" ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}
 }
 
@@ -124,8 +143,17 @@ case "$STEP" in
   logs)     step_logs ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} ;;
   features) step_features ;;
   copy)     step_copy ;;
+  install)  step_install ;;
   session)
     step_update
+    if venv_missing; then
+      warn "No virtualenv on this machine, so nothing can run yet."
+      info "That is normal on a fresh clone, or after the Emote folder was replaced"
+      info "instead of merged. install.sh will rebuild it."
+      printf '    Run the installer now? [Y/n]: '
+      read -r answer
+      case "$answer" in [Nn]*) die "run: bash go.sh install" ;; *) step_install ;; esac
+    fi
     if ! step_check; then
       warn "The health report found problems (see above)."
       printf '    Record anyway? [y/N]: '

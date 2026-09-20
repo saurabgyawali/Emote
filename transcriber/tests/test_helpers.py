@@ -116,3 +116,23 @@ def test_doctor_report_reaches_the_log(caplog, tmp_path, capsys):
     assert "python" in logged and "ctranslate2 CUDA devices" in logged
     assert "doctor STATUS: PROBLEMS FOUND" in logged
     assert "STATUS:" in printed
+
+
+def test_stop_key_line_mode(monkeypatch):
+    """Without a terminal (pipe, nohup) Enter/q still stop the run."""
+    import io
+    import threading
+
+    from transcriber.main import Pipeline
+
+    class Fake:
+        stop_event = threading.Event()
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n"))
+    assert Pipeline._read_stop_key(Fake()) is True
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("q\n"))
+    assert Pipeline._read_stop_key(Fake()) is True
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    assert Pipeline._read_stop_key(Fake()) is False

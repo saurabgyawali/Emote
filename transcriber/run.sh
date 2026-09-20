@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Run the transcriber with config.toml. Extra arguments pass through:
-#   bash run.sh                       # microphone session
+#   bash run.sh                       # microphone session (shows the INFO log)
+#   bash run.sh --quiet               # ...transcript only, nothing else on screen
+#   bash run.sh --verbose             # ...full DEBUG log on screen
 #   bash run.sh --list-devices        # find your microphone
 #   bash run.sh --doctor              # environment health report
 #   bash run.sh --wav file.wav        # transcribe a file through the same pipeline

@@ -544,6 +544,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--name", default=None, help="Optional label appended to the session folder name.")
     p.add_argument("--list-devices", action="store_true", help="List input devices and exit.")
     p.add_argument("--doctor", action="store_true", help="Print an environment health report and exit.")
+    p.add_argument("--mic-check", nargs="?", type=float, const=10.0, default=None, metavar="SECONDS",
+                   help="Record for a few seconds (default 10) and show a live level meter plus what the VAD hears, then exit.")
     p.add_argument("--verbose", "-v", action="store_true", help="Show DEBUG log lines on the console too (they are always in logs/run_*.log).")
     p.add_argument("--quiet", "-q", action="store_true", help="Print only the transcript; no log lines on the console (logs/run_*.log is unchanged).")
     p.add_argument("--version", action="version", version=f"transcriber {__version__}")
@@ -571,6 +573,86 @@ def main(argv: list[str] | None = None) -> int:
     return rc
 
 
+def mic_check(config: Config, seconds: float) -> int:
+    """Live level meter plus VAD verdict: the only way to see why speech is missed.
+
+    A silent-looking run is almost always input gain, not the pipeline: WebRTC VAD
+    needs a real signal, and a peak near 0.003 (-50 dBFS) reads as silence.
+    """
+    devices = list_input_devices()
+    device = resolve_device(config.microphone, devices)
+    input_sr = config.capture_sample_rate or pick_samplerate(device, config.target_sample_rate)
+    blocksize = 0 if config.block_duration_ms <= 0 else max(1, int(input_sr * config.block_duration_ms / 1000))
+    resampler = Resampler(input_sr, config.target_sample_rate)
+    gate = VadGate(config.vad_aggressiveness, config.target_sample_rate, config.frame_duration_ms)
+    frame_bytes = gate.frame_bytes
+
+    audio_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=config.input_queue_max_blocks)
+    capture = AudioCapture(audio_queue, device, input_sr, blocksize, config.latency)
+    dev_name = next((d["name"] for d in devices if d["index"] == device), "system default")
+    print(f"Listening on [{device}] {dev_name} at {input_sr} Hz for {seconds:.0f}s. Speak normally.\n")
+
+    peak_all = 0.0
+    sum_sq = 0.0
+    n_samples = 0
+    speech_frames = 0
+    total_frames = 0
+    pending = b""
+    capture.start()
+    t_end = time.monotonic() + seconds
+    try:
+        while time.monotonic() < t_end:
+            try:
+                block = audio_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            peak = float(np.max(np.abs(block))) if block.size else 0.0
+            peak_all = max(peak_all, peak)
+            sum_sq += float(np.sum(block.astype(np.float64) ** 2))
+            n_samples += block.size
+            pending += float_to_pcm16(resampler.process(block)).tobytes()
+            while len(pending) >= frame_bytes:
+                frame, pending = pending[:frame_bytes], pending[frame_bytes:]
+                total_frames += 1
+                if gate.is_speech(frame):
+                    speech_frames += 1
+            bars = min(40, int(peak * 200))
+            print(f"\r  level [{'#' * bars:<40}] peak {peak:.4f}", end="", flush=True)
+    finally:
+        capture.stop()
+
+    rms = (sum_sq / n_samples) ** 0.5 if n_samples else 0.0
+    speech_pct = 100.0 * speech_frames / total_frames if total_frames else 0.0
+    print(f"\n\n  peak      : {peak_all:.4f} ({_dbfs(peak_all)})")
+    print(f"  rms       : {rms:.4f} ({_dbfs(rms)})")
+    print(f"  VAD       : {speech_pct:.1f}% of {total_frames} frames counted as speech "
+          f"(aggressiveness {config.vad_aggressiveness})")
+    print(f"  overflows : {capture.overflow_count}")
+
+    if peak_all < 0.01:
+        print("\n  VERDICT: too quiet. The VAD will hear silence and nothing will be transcribed.")
+        print("  Raise the capture gain, then re-check:")
+        print("    alsamixer -c 0      # F4 for capture, arrow up, Esc")
+        print("    amixer -c 0 sset Mic 80% cap     # or 'Capture' on some devices")
+        print("  Also check the mic is not muted and that you are close to it.")
+        return 1
+    if peak_all > 0.95:
+        print("\n  VERDICT: clipping. Lower the capture gain or move back from the mic.")
+        return 1
+    if speech_pct < 5.0:
+        print("\n  VERDICT: signal is present but the VAD barely triggers.")
+        print(f"  Speak during the whole check, or lower vad.aggressiveness below {config.vad_aggressiveness}.")
+        return 1
+    print("\n  VERDICT: levels look usable. Run: bash run.sh")
+    return 0
+
+
+def _dbfs(x: float) -> str:
+    import math
+
+    return "-inf dBFS" if x <= 0 else f"{20 * math.log10(x):.0f} dBFS"
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     if args.list_devices:
         listing = format_devices(list_input_devices())
@@ -581,6 +663,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         from .doctor import run_doctor
 
         return run_doctor(Path(args.config))
+    if args.mic_check is not None:
+        return mic_check(load_config(args.config), args.mic_check)
     log_environment(logger)
     config = load_config(args.config)
     log_config(config)

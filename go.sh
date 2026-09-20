@@ -11,6 +11,7 @@
 #   bash go.sh update     # git pull (or tell you how to copy the code across)
 #   bash go.sh install    # create/repair the virtualenv, CUDA CTranslate2 and the model
 #   bash go.sh check      # health report only
+#   bash go.sh mic        # 10s microphone level meter (run this if nothing gets transcribed)
 #   bash go.sh record     # recording session only
 #   bash go.sh logs       # diagnostics tarball only
 #   bash go.sh features   # emotion_analysis stage: sessions -> features.csv
@@ -30,8 +31,8 @@ die()  { printf '\n\033[31mStopped: %s\033[0m\n' "$*" >&2; exit 1; }
 
 STEP="session"
 case "${1:-}" in
-  update|install|check|record|logs|features|copy) STEP="$1"; shift ;;
-  -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+  update|install|check|mic|record|logs|features|copy) STEP="$1"; shift ;;
+  -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
 esac
 RUN_ARGS=("$@")
 
@@ -73,6 +74,11 @@ step_check() {
   bash "$TRANSCRIBER/run.sh" --doctor
 }
 
+step_mic() {
+  say "Microphone level check"
+  bash "$TRANSCRIBER/run.sh" --mic-check ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}
+}
+
 step_record() {
   say "Recording a session"
   info "Speak when it says it is listening."
@@ -84,14 +90,15 @@ step_record() {
 
 step_logs() {
   say "Bundling the logs"
-  bash "$TRANSCRIBER/scripts/collect_diagnostics.sh" "$@"
+  bash "$TRANSCRIBER/scripts/collect_diagnostics.sh" --out "$TRANSCRIBER/logs" "$@"
   local bundle
-  bundle="$(ls -t "$TRANSCRIBER"/diagnostics_*.tar.gz 2>/dev/null | head -1)"
+  bundle="$(ls -t "$TRANSCRIBER"/logs/diagnostics_*.tar.gz 2>/dev/null | head -1)"
   if [ -n "$bundle" ]; then
     printf '\n\033[1m==> Bring this ONE file back\033[0m\n'
     info "$bundle"
     info ""
-    info "Drag it off this machine and drop it in the project's  incoming/  folder."
+    info "Drag it off this machine into the same place on the other side:"
+    info "  Emote/transcriber/logs/"
     info "It holds the logs, health report, transcripts and system facts -- but no audio."
     info "Need the recordings too? Re-run: bash go.sh logs --with-audio"
   else
@@ -144,6 +151,7 @@ case "$STEP" in
   features) step_features ;;
   copy)     step_copy ;;
   install)  step_install ;;
+  mic)      step_mic ;;
   session)
     step_update
     if venv_missing; then

@@ -28,7 +28,7 @@ done
 if [ "$DRY" = "yes" ]; then
   echo "Would collect from $PROJECT_DIR:"
   echo "  system.txt   OS, L4T/JetPack, CUDA, memory, disk, top memory users, power mode, tegrastats sample"
-  echo "  audio.txt    lsusb, arecord -l/-L, /dev/snd holders, sound-server processes, PortAudio device list"
+  echo "  audio.txt    lsusb, arecord -l/-L, /dev/snd holders, sound-server processes, PortAudio device list, capture gain (amixer/pactl)"
   echo "  python.txt   interpreter, pip list, ctranslate2 version/CUDA/compute types/library resolution"
   echo "  kernel.txt   dmesg / journal tail, OOM-kill and USB/audio lines"
   echo "  build.txt    $CT2_BUILD_ROOT contents, installed libctranslate2, ldconfig entries"
@@ -93,6 +93,10 @@ sh_run python.txt '"$PY" -V; echo "$PY"; "$PY" -m pip --version'
 sh_run python.txt 'cd / && "$PY" "$STAGE/ct2_probe.py"'
 sh_run python.txt '"$PY" -c "import transcriber, faster_whisper, numpy, scipy, webrtcvad; print(\"transcriber\", transcriber.__version__, \"faster_whisper\", faster_whisper.__version__, \"numpy\", numpy.__version__, \"scipy\", scipy.__version__)"'
 sh_run python.txt '"$PY" -m pip list'
+
+sh_run audio.txt 'for c in $(cat /proc/asound/cards 2>/dev/null | grep -oE "^ *[0-9]+" ); do echo "--- card $c ---"; amixer -c "$c" contents 2>&1 | head -60; done'
+sh_run audio.txt 'amixer -c 0 2>&1 | head -40'
+sh_run audio.txt 'pactl list sources 2>/dev/null | grep -E "Name:|Volume:|Mute:|Description:"'
 
 sh_run kernel.txt 'dmesg | tail -80'
 sh_run kernel.txt 'journalctl -k -n 80 --no-pager'

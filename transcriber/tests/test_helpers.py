@@ -136,3 +136,11 @@ def test_stop_key_line_mode(monkeypatch):
 
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
     assert Pipeline._read_stop_key(Fake()) is False
+
+
+def test_dbfs_scale():
+    from transcriber.main import _dbfs
+
+    assert _dbfs(0.0) == "-inf dBFS"
+    assert _dbfs(1.0) == "0 dBFS"
+    assert _dbfs(0.003).startswith("-50")   # the level seen on the silent Jetson run

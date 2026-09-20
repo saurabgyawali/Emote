@@ -34,3 +34,6 @@ diagnostics_*.tar.gz
 
 # OS noise
 .DS_Store
+
+# Built wheels: device artifacts, not history
+ct2/wheels/

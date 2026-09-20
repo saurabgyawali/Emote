@@ -249,6 +249,7 @@ collects the diagnostics tarball when you stop. Each step can be run on its own:
 |---------|------|
 | `bash go.sh update` | `git pull --ff-only`, or tells you how to get the code across. |
 | `bash go.sh check` | Health report (`run.sh --doctor`). |
+| `bash go.sh mic` | 10-second level meter: is the microphone loud enough for the VAD? |
 | `bash go.sh record` | A recording session only. |
 | `bash go.sh --quiet` | The full loop, but only the transcript on screen while recording. |
 | `bash go.sh logs` | Diagnostics tarball only. |
@@ -261,6 +262,7 @@ collects the diagnostics tarball when you stop. Each step can be run on its own:
 cd Emote/transcriber
 bash run.sh --list-devices      # find the mic; put a name substring in config.toml
 bash run.sh --doctor            # environment health report
+bash run.sh --mic-check         # 10s level meter + VAD verdict (run this if nothing transcribes)
 bash run.sh                     # talk; Esc / Enter / q / Ctrl+C stops and saves everything
 bash run.sh --quiet             # transcript lines only on screen
 bash run.sh --verbose           # full DEBUG log on screen
@@ -322,7 +324,7 @@ bash go.sh copy --tar           # -> ../Emote-<date>.tar.gz including the model
 | 3 | Jetson | Drop it **on top of** `~/Developer/RASL/Emote`, merge/replace |
 | 4 | Jetson | `cd ~/Developer/RASL/Emote && bash go.sh` |
 | 5 | Your computer | Take the one tarball it names at the end |
-| 6 | Server | Drop it in `incoming/` |
+| 6 | Server | Drop it in `transcriber/logs/` |
 
 If the Jetson ever gets this repo directly (it does have internet — the installer reaches
 PyPI), `bash go.sh update` will `git pull` instead and steps 1–3 disappear.
@@ -339,10 +341,11 @@ and are deliberately not in the copy.
 transcriber/diagnostics_<hostname>_<timestamp>.tar.gz
 ```
 
-Drag that one file back and drop it in this repo's `incoming/` folder. It contains the run
-logs, the health report, session transcripts and metadata, and the system, audio, CUDA and
-kernel facts. Audio is excluded unless you run `bash go.sh logs --with-audio`.
-`incoming/` is gitignored, so nothing dropped there is ever committed.
+It is written to `transcriber/logs/`. Drag that one file back into the same folder on the
+server. It contains the run logs, the health report, session transcripts and metadata, and
+the system, audio, CUDA and kernel facts. Audio is excluded unless you run
+`bash go.sh logs --with-audio`. `transcriber/logs/` is gitignored, so nothing dropped there
+is ever committed.
 
 Lower-level packing:
 

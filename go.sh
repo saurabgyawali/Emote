@@ -12,7 +12,7 @@
 #   bash go.sh record     # recording session only
 #   bash go.sh logs       # diagnostics tarball only
 #   bash go.sh features   # emotion_analysis stage: sessions -> features.csv
-#   bash go.sh copy       # build a tarball to carry to a machine with no network
+#   bash go.sh copy       # build a clean folder to drag to the Jetson (--tar for a tarball)
 #
 # Every step is a thin wrapper around the script that already does the work
 # (transcriber/run.sh, scripts/collect_diagnostics.sh, run_pipeline.sh, pack.sh).
@@ -75,9 +75,35 @@ step_features() {
 }
 
 step_copy() {
-  say "Building a tarball to carry across"
-  bash "$HERE/pack.sh" --with-model
-  info "Copy that .tar.gz to the other machine and extract it over the existing Emote folder."
+  for arg in ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}; do
+    if [ "$arg" = "--tar" ]; then
+      say "Building a tarball to carry across"
+      bash "$HERE/pack.sh" --with-model
+      info "Extract it OVER the existing Emote folder on the Jetson. Do not delete that folder first."
+      return 0
+    fi
+  done
+
+  local dest="$(dirname "$HERE")/Emote-to-copy"
+  say "Building a clean folder to drag across"
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  # Code and config only: no 11 GB ct2 tree, no venv, no logs, no recordings.
+  # The Jetson keeps its own models, venv, logs and sessions when you copy over the top.
+  tar -C "$HERE" -cf - \
+      --exclude="ct2/CTranslate2" --exclude="transcriber/models" --exclude="transcriber/sessions" \
+      --exclude="transcriber/logs" --exclude="logs copy" --exclude=".git" \
+      --exclude=".venv" --exclude=".venv.broken" --exclude=".venv_path" --exclude=".hf_cache" \
+      --exclude="__pycache__" --exclude=".pytest_cache" --exclude="*.pyc" \
+      --exclude="emotion_analysis/results" \
+      . | tar -C "$dest" -xf -
+  info "Folder : $dest  ($(du -sh --apparent-size "$dest" | cut -f1) of code in $(find "$dest" -type f | wc -l) files)"
+  info ""
+  info "Drag that folder onto the Jetson and drop it ON TOP of /home/jetson/Developer/RASL/Emote"
+  info "(choose Merge / Replace when asked). Do NOT delete the Emote folder there first --"
+  info "its models, venv, CUDA build and past logs are not in this copy and would be lost."
+  info ""
+  info "Then on the Jetson:  cd ~/Developer/RASL/Emote && bash go.sh"
 }
 
 case "$STEP" in

@@ -1,0 +1,57 @@
+# Emote transcriber configuration -- the ONE file you edit.
+# install.sh, run.sh and the program all read this file. Relative paths are
+# resolved from this folder. Re-run `bash run.sh` after editing.
+#
+# Interactive alternative:  bash install.sh --interactive   (rewrites the
+# values below in place and keeps the comments).
+
+[audio]
+# Microphone: a name substring (case-insensitive, e.g. "USB") or a device
+# index. Name substrings are preferred: USB indices change between boots.
+# List devices with:  bash run.sh --list-devices
+microphone = "USB"
+# "auto" = try 16000 Hz first (no resampling), then the device default.
+capture_sample_rate = "auto"
+target_sample_rate = 16000      # what VAD + Whisper receive; do not change
+block_duration_ms = 100         # larger blocks = fewer input overflows
+input_queue_max_blocks = 100
+latency = "high"                # "high" | "low" | seconds, e.g. "0.2"
+
+[vad]
+aggressiveness = 2              # 0 (lax) .. 3 (strict)
+frame_duration_ms = 30          # 10 | 20 | 30
+speech_start_frames = 3         # consecutive speech frames that start an utterance
+silence_end_ms = 700            # trailing silence that ends an utterance
+min_speech_ms = 300             # shorter blips (coughs, clicks) are discarded
+max_utterance_s = 15            # long monologues are chunked at this length
+preroll_ms = 300                # audio kept before speech starts
+
+[model]
+name = "small.en"               # tiny.en | base.en | small.en | medium.en | distil-large-v3
+download_dir = "models"
+device = "auto"                 # "auto" = cuda if the CUDA CTranslate2 build is present, else cpu
+compute_type = "int8_float16"   # cuda: int8_float16 | float16 ; cpu uses int8 automatically
+language = "en"
+beam_size = 1                   # 1 = fastest
+word_timestamps = true          # per-word times (needed for speaking-rate features)
+vad_filter = true               # faster-whisper's Silero VAD trims non-speech inside an utterance
+require_cuda = false            # true = refuse to run on CPU
+cpu_fallback_model = "base.en"  # used when CUDA is unavailable and the model is heavy
+
+[filter]
+# Whisper invents text on noise ("Thank you.", "you"). Utterances failing these
+# are still logged to utterances.jsonl with kept=false, but not printed.
+no_speech_prob_max = 0.6
+avg_logprob_min = -1.2
+compression_ratio_max = 2.4
+
+[context]
+enabled = true                  # feed recent text back as Whisper's prompt
+max_chars = 400
+
+[output]
+sessions_dir = "sessions"       # each run -> sessions/<timestamp>/
+save_session_wav = true         # whole run as one mono WAV
+session_wav_source = "device"   # "device" = native mic rate (best for analysis) | "processed" = 16 kHz
+save_clips = true               # per-utterance 16 kHz clips in clips/
+print_transcript = true         # echo kept utterances to stdout

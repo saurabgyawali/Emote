@@ -1,0 +1,10 @@
+.venv/
+.venv_path
+models/
+.hf_cache/
+.cache/
+sessions/
+logs/
+__pycache__/
+*.py[cod]
+.pytest_cache/

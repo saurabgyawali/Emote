@@ -5,6 +5,7 @@
 #   bash run_pipeline.sh --wav clip.wav         # run the same pipeline over a file instead of the mic
 #   bash run_pipeline.sh --name interview1      # label the session
 #   bash run_pipeline.sh --skip-train           # stop after feature extraction
+#   bash run_pipeline.sh --no-record            # skip recording; extract from the sessions already on disk
 #   bash run_pipeline.sh --foreground-train     # wait for training instead of backgrounding it
 #
 # Each stage is idempotent: extract_features.py only processes new utterances,
@@ -18,12 +19,14 @@ ANALYSIS="$HERE/emotion_analysis"
 
 SKIP_TRAIN="no"
 FOREGROUND_TRAIN="no"
+NO_RECORD="no"
 TRANSCRIBER_ARGS=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --skip-train) SKIP_TRAIN="yes"; shift ;;
     --foreground-train) FOREGROUND_TRAIN="yes"; shift ;;
+    --no-record) NO_RECORD="yes"; shift ;;
     *) TRANSCRIBER_ARGS+=("$1"); shift ;;
   esac
 done
@@ -61,10 +64,13 @@ if [ -z "$APY" ]; then
 fi
 info "Using interpreter: $APY"
 
-say "1) Transcriber: audio -> session folder"
-if ! bash "$TRANSCRIBER/run.sh" "${TRANSCRIBER_ARGS[@]}"; then
+if [ "$NO_RECORD" = "yes" ]; then
+  say "1) Transcriber: skipped (--no-record); using the sessions already in $TRANSCRIBER/sessions"
+elif ! bash "$TRANSCRIBER/run.sh" "${TRANSCRIBER_ARGS[@]}"; then
   echo "Transcriber stage failed; stopping (feature extraction needs a session)." >&2
   exit 1
+else
+  say "1) Transcriber: audio -> session folder"
 fi
 
 say "2) Feature extraction: session folders -> features.csv"

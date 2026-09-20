@@ -201,6 +201,7 @@ Emote/
 │   ├── wheels/                     # Cached built wheels — turns a 45 min build into seconds
 │   └── README.md
 │
+├── go.sh                           # The one command: update -> check -> record -> bundle logs
 ├── run_pipeline.sh                 # Transcribe -> extract features -> train baseline, one command
 ├── pack.sh                         # Clean tarball for copying to the Jetson
 ├── CLAUDE.md                       # Engineering context, verified facts, debugging playbook
@@ -232,9 +233,31 @@ Everything is tee'd to `logs/install_<timestamp>.log`.
 
 Useful flags: `--skip-cuda-build`, `--only-cuda`, `--only-model`, `--ct2-jobs 2` (if the compile is OOM-killed), `--debug`.
 
-### Run a live session
+### Run a session — one command
 
 ```bash
+cd Emote
+bash go.sh                      # update the code, check the machine, record, bundle the logs
+bash go.sh --name interview     # ...and label the session folder
+```
+
+That is the whole loop. `go.sh` is a thin wrapper: it pulls the latest code (when this is a
+git checkout with a remote), runs the health report, starts the recording session, and
+collects the diagnostics tarball when you stop. Each step can be run on its own:
+
+| Command | Does |
+|---------|------|
+| `bash go.sh update` | `git pull --ff-only`, or tells you how to get the code across. |
+| `bash go.sh check` | Health report (`run.sh --doctor`). |
+| `bash go.sh record` | A recording session only. |
+| `bash go.sh logs` | Diagnostics tarball only. |
+| `bash go.sh features` | Feature extraction over the sessions already recorded. |
+| `bash go.sh copy` | Tarball for a machine with no network. |
+
+### The underlying commands
+
+```bash
+cd Emote/transcriber
 bash run.sh --list-devices      # find the mic; put a name substring in config.toml
 bash run.sh --doctor            # environment health report
 bash run.sh                     # talk; Enter / q / Ctrl+C stops and saves everything
@@ -278,8 +301,26 @@ cd Emote/emotion_analysis && .venv/bin/python -m pytest -q tests
 
 ## 📦 Moving to the Jetson
 
+**If the Jetson has internet (it does — the installer reaches PyPI), use git.** Push this repo
+once, clone it on the Jetson, and from then on `bash go.sh` pulls each update by itself:
+
+```bash
+# on the Jetson, once
+cd ~/Developer/RASL && git clone <your repo url> Emote
+cd Emote/transcriber && bash install.sh
+
+# every time after that
+cd ~/Developer/RASL/Emote && bash go.sh
+```
+
+Weights, the CTranslate2 tree, sessions, and logs are all gitignored, so a `git pull` moves
+only code and never touches the ~12 GB of artifacts already on the device.
+
+**Without a network**, carry a tarball instead:
+
 ```bash
 cd Emote
+bash go.sh copy                 # = pack.sh --with-model
 bash pack.sh                    # -> ../Emote-<date>.tar.gz, clean
 bash pack.sh --with-model       # ...including the Whisper weights, so the Jetson need not download them
 bash pack.sh --with-ct2-src     # ...including the 11 GB CTranslate2 source tree (rarely wanted)

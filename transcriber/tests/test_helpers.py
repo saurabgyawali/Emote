@@ -83,3 +83,36 @@ def test_model_repo_names():
     assert model_repo("small.en") == "Systran/faster-whisper-small.en"
     assert model_repo("distil-large-v3") == "Systran/faster-distil-whisper-large-v3"
     assert model_repo("someorg/custom-model") == "someorg/custom-model"
+
+
+def test_resolve_device_reuses_given_devices(monkeypatch):
+    from transcriber import audio_capture
+
+    monkeypatch.setattr(
+        audio_capture, "list_input_devices",
+        lambda: (_ for _ in ()).throw(AssertionError("PortAudio was queried again")),
+    )
+    devices = [
+        {"index": 0, "name": "USB PnP Sound Device: Audio (hw:0,0)", "max_input_channels": 1,
+         "default_samplerate": 44100, "hostapi": "ALSA"},
+        {"index": 5, "name": "NVIDIA Jetson Orin Nano APE: - (hw:2,0)", "max_input_channels": 16,
+         "default_samplerate": 44100, "hostapi": "ALSA"},
+    ]
+    assert audio_capture.resolve_device("USB", devices) == 0
+    assert audio_capture.resolve_device(5, devices) == 5
+
+
+def test_doctor_report_reaches_the_log(caplog, tmp_path, capsys):
+    import logging
+
+    from transcriber.doctor import run_doctor
+
+    with caplog.at_level(logging.INFO, logger="transcriber.doctor"):
+        rc = run_doctor(tmp_path / "missing.toml")
+    logged = caplog.text
+    printed = capsys.readouterr().out
+    assert rc == 1
+    assert "doctor report" in logged
+    assert "python" in logged and "ctranslate2 CUDA devices" in logged
+    assert "doctor STATUS: PROBLEMS FOUND" in logged
+    assert "STATUS:" in printed

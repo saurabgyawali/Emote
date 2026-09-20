@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import platform
 import sys
 from pathlib import Path
 
 from .config import Config, load_config
 from .whisper_backend import cuda_device_count, model_is_downloaded
+
+logger = logging.getLogger(__name__)
 
 
 def _pkg_version(name: str) -> str:
@@ -53,7 +56,7 @@ def run_doctor(config_path: Path) -> int:
             devices = list_input_devices()
             rows.append(("input devices", "\n" + format_devices(devices)))
             try:
-                idx = resolve_device(config.microphone)
+                idx = resolve_device(config.microphone, devices)
                 rows.append(("microphone", f"{config.microphone!r} -> index {idx if idx is not None else 'default'}"))
             except Exception as exc:  # noqa: BLE001
                 ok = False
@@ -64,7 +67,14 @@ def run_doctor(config_path: Path) -> int:
             rows.append(("input devices", f"{'PROBLEM: ' if is_jetson else ''}unavailable ({exc})"))
 
     width = max(len(k) for k, _ in rows)
+    # Printed for the terminal and logged for the diagnostics bundle: a --doctor run
+    # left nothing but device lines and "Exit code 0" in run_*.log (Jetson, 2026-09-20).
+    logger.info("=== doctor report ===")
     for key, val in rows:
-        print(f"{key:<{width}}  {val}")
-    print("\nSTATUS:", "OK" if ok else "PROBLEMS FOUND (see above)")
+        line = f"{key:<{width}}  {val}"
+        print(line)
+        logger.info("%s", line)
+    status = "OK" if ok else "PROBLEMS FOUND (see above)"
+    print("\nSTATUS:", status)
+    logger.info("doctor STATUS: %s", status)
     return 0 if ok else 1

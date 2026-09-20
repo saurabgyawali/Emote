@@ -76,13 +76,18 @@ def format_devices(devices: list[dict[str, Any]]) -> str:
     )
 
 
-def resolve_device(selector: str | int | None) -> int | None:
-    """Map a config selector to a PortAudio input-device index (None = default)."""
+def resolve_device(selector: str | int | None, devices: list[dict[str, Any]] | None = None) -> int | None:
+    """Map a config selector to a PortAudio input-device index (None = default).
+
+    Pass `devices` when the caller has already enumerated them: querying PortAudio
+    again re-logs every device (34 lines on the Jetson) for no new information.
+    """
     logger.info("Resolving microphone selector %r", selector)
     if selector is None or selector == "":
         logger.info("No microphone configured; using the system default input.")
         return None
-    devices = list_input_devices()
+    if devices is None:
+        devices = list_input_devices()
     logger.info("Input devices:\n%s", format_devices(devices))
     if isinstance(selector, int) or str(selector).strip().isdigit():
         idx = int(selector)

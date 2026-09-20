@@ -270,7 +270,8 @@ class Pipeline:
     def run_microphone(self) -> int:
         logger.info("=== microphone run: session %s ===", self.session.name)
         self.backend.load()
-        device = resolve_device(self.config.microphone)
+        devices = list_input_devices()
+        device = resolve_device(self.config.microphone, devices)
         if self.config.capture_sample_rate:
             input_sr = self.config.capture_sample_rate
             logger.info("Capture sample rate forced by config: %d Hz", input_sr)
@@ -278,7 +279,7 @@ class Pipeline:
             input_sr = pick_samplerate(device, self.config.target_sample_rate)
         blocksize = 0 if self.config.block_duration_ms <= 0 else max(1, int(input_sr * self.config.block_duration_ms / 1000))
         resampler = Resampler(input_sr, self.config.target_sample_rate)
-        dev_name = next((d["name"] for d in list_input_devices() if d["index"] == device), "system default")
+        dev_name = next((d["name"] for d in devices if d["index"] == device), "system default")
         logger.info(
             "Audio plan: device=[%s] %s, capture=%d Hz -> %d Hz (%s), block=%d samples (%s), VAD frame=%d ms, queue max=%d blocks (%.1fs)",
             device, dev_name, input_sr, self.config.target_sample_rate, resampler.backend, blocksize,
@@ -513,7 +514,9 @@ def main(argv: list[str] | None = None) -> int:
 
 def _dispatch(args: argparse.Namespace) -> int:
     if args.list_devices:
-        print(format_devices(list_input_devices()))
+        listing = format_devices(list_input_devices())
+        logger.info("Input devices:\n%s", listing)
+        print(listing)
         return 0
     if args.doctor:
         from .doctor import run_doctor

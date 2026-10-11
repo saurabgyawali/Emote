@@ -3,6 +3,7 @@
 #
 #   bash go.sh                 # update the code, check the machine, record, bundle the logs
 #   bash go.sh --quiet         # ...showing only the transcript while recording
+#   bash go.sh --log           # ...showing the INFO log instead of the mascot screen
 #   bash go.sh --name demo1    # ...and label the session folder
 #   bash go.sh --wav clip.wav  # ...over an audio file instead of the microphone
 #
@@ -14,6 +15,8 @@
 #   bash go.sh mic        # 10s microphone level meter (run this if nothing gets transcribed)
 #   bash go.sh record     # recording session only
 #   bash go.sh logs       # diagnostics tarball only
+#   bash go.sh vocab      # suggest vocabulary words from your sessions (--write adds them)
+#   bash go.sh emotions   # label recorded utterances with the trained emotion model (emotion_deploy/)
 #   bash go.sh features   # emotion_analysis stage: sessions -> features.csv
 #   bash go.sh copy       # build a clean folder to drag to the Jetson (--tar for a tarball)
 #
@@ -31,8 +34,8 @@ die()  { printf '\n\033[31mStopped: %s\033[0m\n' "$*" >&2; exit 1; }
 
 STEP="session"
 case "${1:-}" in
-  update|install|check|mic|record|logs|features|copy) STEP="$1"; shift ;;
-  -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+  update|install|check|mic|record|logs|vocab|emotions|features|copy) STEP="$1"; shift ;;
+  -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
 esac
 RUN_ARGS=("$@")
 
@@ -84,26 +87,57 @@ step_record() {
   info "Speak when it says it is listening."
   info "Press Esc (or Enter) to stop: the session is saved and the logs are bundled"
   info "up to that point -- stopping early never loses what was already transcribed."
-  info "Add --quiet for transcript-only output, --verbose for the full DEBUG log."
-  bash "$TRANSCRIBER/run.sh" ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}
+  info "Add --quiet for transcript-only output, --log for the INFO log, --verbose for DEBUG."
+  # Anything the recorder prints to stderr is also kept in a file, so a failure that
+  # happens before Python's own run log exists still reaches the diagnostics bundle.
+  # Twice on 2026-10-10 the record step left no trace at all.
+  local console_log rc
+  console_log="$TRANSCRIBER/logs/$(date +%Y-%m-%d)/$(date +%H)/record_console_$(date +%Y%m%d_%H%M%S).log"
+  mkdir -p "$(dirname "$console_log")"
+  # stdout stays on the terminal (fd 3) so the mascot screen still sees a TTY; only stderr
+  # goes through tee, and tee -i survives Ctrl+C so the shutdown summary is not lost.
+  { bash "$TRANSCRIBER/run.sh" ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} 2>&1 1>&3 3>&- | tee -i "$console_log" >&2; } 3>&1
+  rc=${PIPESTATUS[0]}
+  echo "[record exit code $rc]" >> "$console_log"
+  if [ "$rc" -ne 0 ]; then
+    warn "The recorder exited with code $rc. Its error output is saved in:"
+    info "  $console_log"
+  fi
+  return "$rc"
 }
 
 step_logs() {
   say "Bundling the logs"
-  bash "$TRANSCRIBER/scripts/collect_diagnostics.sh" --out "$TRANSCRIBER/logs" "$@"
+  bash "$TRANSCRIBER/scripts/collect_diagnostics.sh" "$@"
   local bundle
-  bundle="$(ls -t "$TRANSCRIBER"/logs/diagnostics_*.tar.gz 2>/dev/null | head -1)"
+  bundle="$(find "$TRANSCRIBER/logs/diagnostics" -name 'diagnostics_*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
   if [ -n "$bundle" ]; then
     printf '\n\033[1m==> Bring this ONE file back\033[0m\n'
     info "$bundle"
     info ""
     info "Drag it off this machine into the same place on the other side:"
-    info "  Emote/transcriber/logs/"
+    info "  Emote/transcriber/logs/diagnostics/<day>/<hour>/"
     info "It holds the logs, health report, transcripts and system facts -- but no audio."
     info "Need the recordings too? Re-run: bash go.sh logs --with-audio"
   else
     warn "No diagnostics tarball was produced; see the output above."
   fi
+}
+
+step_vocab() {
+  say "Vocabulary suggestions from your sessions"
+  local venv="$TRANSCRIBER/.venv"
+  [ -f "$TRANSCRIBER/.venv_path" ] && venv="$(cat "$TRANSCRIBER/.venv_path")"
+  [ -n "${VENV_DIR:-}" ] && venv="$VENV_DIR"
+  "$venv/bin/python" "$TRANSCRIBER/scripts/suggest_vocabulary.py" ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}
+}
+
+step_emotions() {
+  say "Emotion labels for recorded sessions"
+  local venv="$TRANSCRIBER/.venv"
+  [ -f "$TRANSCRIBER/.venv_path" ] && venv="$(cat "$TRANSCRIBER/.venv_path")"
+  [ -n "${VENV_DIR:-}" ] && venv="$VENV_DIR"
+  "$venv/bin/python" "$HERE/pipeline/scripts/export/annotate_sessions.py" ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}
 }
 
 step_features() {
@@ -132,7 +166,8 @@ step_copy() {
       --exclude="transcriber/logs" --exclude="logs copy" --exclude=".git" \
       --exclude=".venv" --exclude=".venv.broken" --exclude=".venv_path" --exclude=".hf_cache" \
       --exclude="__pycache__" --exclude=".pytest_cache" --exclude="*.pyc" \
-      --exclude="emotion_analysis/results" \
+      --exclude="emotion_analysis/results" --exclude="emotion_deploy" \
+      --exclude="pipeline/.data_root" --exclude="pipeline/.venv_path" \
       . | tar -C "$dest" -xf -
   info "Folder : $dest  ($(du -sh --apparent-size "$dest" | cut -f1) of code in $(find "$dest" -type f | wc -l) files)"
   info ""
@@ -148,6 +183,8 @@ case "$STEP" in
   check)    step_check ;;
   record)   step_record ;;
   logs)     step_logs ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} ;;
+  vocab)    step_vocab ;;
+  emotions) step_emotions ;;
   features) step_features ;;
   copy)     step_copy ;;
   install)  step_install ;;
@@ -169,6 +206,11 @@ case "$STEP" in
       case "$answer" in [Yy]*) ;; *) die "fix the problems above, then run bash go.sh again" ;; esac
     fi
     step_record || warn "The session ended with an error; bundling the logs anyway."
+    # Emotion labels only after the whole talk is over: Whisper has exited, so the model
+    # gets the memory and CPU to itself instead of competing with live transcription.
+    if [ -f "$HERE/emotion_deploy/deploy.json" ]; then
+      step_emotions || warn "Emotion labelling failed (see above); the transcript is unaffected."
+    fi
     step_logs
     say "Done"
     ;;

@@ -1,0 +1,4 @@
+# Encoder comparison: HuBERT-Base instead of WavLM-Base-Plus, otherwise E3.
+inherit: ../base.yaml
+model:
+  audio: {encoder: facebook/hubert-base-ls960}

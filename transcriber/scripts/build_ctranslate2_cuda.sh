@@ -56,7 +56,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-BUILD_LOG="${BUILD_LOG:-$PROJECT_DIR/logs/ct2_build_$(date +%Y%m%d_%H%M%S).log}"
+BUILD_LOG="${BUILD_LOG:-$PROJECT_DIR/logs/$(date +%Y-%m-%d)/$(date +%H)/ct2_build_$(date +%Y%m%d_%H%M%S).log}"
 mkdir -p "$(dirname "$BUILD_LOG")"
 exec > >(tee -a "$BUILD_LOG") 2>&1
 echo "[ct2-build] started $(date -Is); log: $BUILD_LOG; args: $*"

@@ -1,0 +1,2 @@
+# WavLM with its top 4 layers fine-tuned: the main audio-only model.
+inherit: ../base.yaml

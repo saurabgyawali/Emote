@@ -20,4 +20,8 @@ by `sudo make install`; this tree is the source it is built from, not where it r
 (`--with-ct2-src` includes it). `wheels/` is always packed, so a fresh copy of `Emote/`
 on the Jetson installs CUDA CTranslate2 without recompiling.
 
+Both are gitignored. A wheel is an aarch64 + cp310 + CUDA binary that no other machine
+can use, and it is rebuilt in minutes from the C++ library in `/usr/local`; it belongs on
+the device that built it, not in git history. Keep the file, do not commit it.
+
 Safe to delete if disk is needed: `install.sh` re-clones and recompiles. Keep `wheels/`.

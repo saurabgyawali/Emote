@@ -20,10 +20,11 @@ export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 
 # Everything this script prints (and every command it runs) is also written to
 # logs/install_<timestamp>.log so a failed install can be diagnosed afterwards.
-mkdir -p "$PROJECT_DIR/logs"
-INSTALL_LOG="$PROJECT_DIR/logs/install_$(date +%Y%m%d_%H%M%S).log"
+LOG_DAY_DIR="$PROJECT_DIR/logs/$(date +%Y-%m-%d)/$(date +%H)"
+mkdir -p "$LOG_DAY_DIR"
+INSTALL_LOG="$LOG_DAY_DIR/install_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$INSTALL_LOG") 2>&1
-ln -sfn "$(basename "$INSTALL_LOG")" "$PROJECT_DIR/logs/install_latest.log" 2>/dev/null || printf "%s\n" "$INSTALL_LOG" > "$PROJECT_DIR/logs/install_latest.log"
+ln -sfn "${INSTALL_LOG#"$PROJECT_DIR/logs/"}" "$PROJECT_DIR/logs/install_latest.log" 2>/dev/null || printf "%s\n" "$INSTALL_LOG" > "$PROJECT_DIR/logs/install_latest.log"
 echo "install.sh started $(date -Is); log: $INSTALL_LOG; args: $*"
 
 VENV_DIR="${VENV_DIR:-}"
@@ -141,8 +142,8 @@ if [ -z "$ONLY" ]; then
   CONSTRAINT_ARGS=()
   CT2_CUDA_VER="$("$PY" -c 'import ctranslate2 as c; print(c.__version__ if c.get_cuda_device_count() > 0 else "")' 2>/dev/null || true)"
   if [ -n "$CT2_CUDA_VER" ]; then
-    printf 'ctranslate2==%s\n' "$CT2_CUDA_VER" > "$PROJECT_DIR/logs/ct2_constraint.txt"
-    CONSTRAINT_ARGS=(-c "$PROJECT_DIR/logs/ct2_constraint.txt")
+    printf 'ctranslate2==%s\n' "$CT2_CUDA_VER" > "$LOG_DAY_DIR/ct2_constraint.txt"
+    CONSTRAINT_ARGS=(-c "$LOG_DAY_DIR/ct2_constraint.txt")
     info "keeping CUDA ctranslate2 $CT2_CUDA_VER pinned during pip install"
   fi
   if "$PY" -m pip install -q "${CONSTRAINT_ARGS[@]}" -r "$PROJECT_DIR/requirements.txt"; then

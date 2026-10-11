@@ -28,14 +28,15 @@ class Config:
     capture_sample_rate: int = 0          # 0 = auto (prefer 16 kHz, else device default)
     target_sample_rate: int = 16000
     block_duration_ms: int = 100
+    input_gain: float = 1.0
     input_queue_max_blocks: int = 100
-    latency: str = "high"
+    latency: str = "0.5"
 
     # [vad]
     frame_duration_ms: int = 30
     vad_aggressiveness: int = 2
     speech_start_frames: int = 3
-    silence_end_ms: int = 700
+    silence_end_ms: int = 1000
     min_speech_ms: int = 300
     max_utterance_s: float = 15.0
     preroll_ms: int = 300
@@ -46,11 +47,13 @@ class Config:
     device: str = "auto"                  # cuda | cpu | auto
     compute_type: str = "int8_float16"
     language: str = "en"
-    beam_size: int = 1
+    beam_size: int = 5
     word_timestamps: bool = True
     vad_filter: bool = True
     require_cuda: bool = False
     cpu_fallback_model: str = "base.en"
+    temperature: float = 0.0
+    vocabulary_file: str = "vocabulary.txt"
 
     # [filter]
     no_speech_prob_max: float = 0.6
@@ -60,6 +63,7 @@ class Config:
     # [context]
     context_enabled: bool = True
     context_max_chars: int = 400
+    context_min_logprob: float = -0.5
 
     # [output]
     sessions_dir: str = "sessions"
@@ -73,6 +77,10 @@ class Config:
     @property
     def model_path(self) -> Path:
         return self._abs(self.model_dir)
+
+    @property
+    def vocabulary_path(self) -> Path:
+        return self._abs(self.vocabulary_file)
 
     @property
     def sessions_path(self) -> Path:
@@ -101,6 +109,9 @@ class Config:
         if isinstance(mic, str) and mic.strip() == "":
             mic = None
 
+        gain = float(audio.get("input_gain", 1.0))
+        if gain <= 0:
+            raise ValueError(f"audio.input_gain must be > 0, got {gain}")
         cap = audio.get("capture_sample_rate", 0)
         if isinstance(cap, str):
             cap = 0 if cap.strip().lower() in ("", "auto") else int(cap)
@@ -109,6 +120,7 @@ class Config:
         return cls(
             microphone=mic,
             capture_sample_rate=int(cap),
+            input_gain=gain,
             target_sample_rate=int(audio.get("target_sample_rate", defaults.target_sample_rate)),
             block_duration_ms=int(audio.get("block_duration_ms", defaults.block_duration_ms)),
             input_queue_max_blocks=int(audio.get("input_queue_max_blocks", defaults.input_queue_max_blocks)),
@@ -130,11 +142,14 @@ class Config:
             vad_filter=bool(model.get("vad_filter", defaults.vad_filter)),
             require_cuda=bool(model.get("require_cuda", defaults.require_cuda)),
             cpu_fallback_model=str(model.get("cpu_fallback_model", defaults.cpu_fallback_model)),
+            temperature=float(model.get("temperature", defaults.temperature)),
+            vocabulary_file=str(model.get("vocabulary_file", defaults.vocabulary_file)),
             no_speech_prob_max=float(filt.get("no_speech_prob_max", defaults.no_speech_prob_max)),
             avg_logprob_min=float(filt.get("avg_logprob_min", defaults.avg_logprob_min)),
             compression_ratio_max=float(filt.get("compression_ratio_max", defaults.compression_ratio_max)),
             context_enabled=bool(context.get("enabled", defaults.context_enabled)),
             context_max_chars=int(context.get("max_chars", defaults.context_max_chars)),
+            context_min_logprob=float(context.get("min_logprob", defaults.context_min_logprob)),
             sessions_dir=str(output.get("sessions_dir", defaults.sessions_dir)),
             save_session_wav=bool(output.get("save_session_wav", defaults.save_session_wav)),
             session_wav_source=str(output.get("session_wav_source", defaults.session_wav_source)),
@@ -164,6 +179,8 @@ class Config:
             problems.append(f"model.device must be cuda, cpu or auto (got {self.device!r})")
         if self.beam_size < 1:
             problems.append("model.beam_size must be >= 1")
+        if not 0.0 <= self.temperature <= 1.0:
+            problems.append(f"model.temperature must be 0..1 (got {self.temperature})")
         if self.session_wav_source not in ("device", "processed"):
             problems.append(f"output.session_wav_source must be device or processed (got {self.session_wav_source!r})")
         if self.max_utterance_s <= 0:

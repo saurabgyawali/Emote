@@ -1,0 +1,6 @@
+# Cross-corpus: CREMA-D held out entirely (91 unseen actors, unseen recording setup).
+inherit: ../base.yaml
+data: {heldout_datasets: [crema_d]}
+model:
+  text: {enabled: true}
+  prosody: {enabled: true}

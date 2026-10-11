@@ -14,9 +14,9 @@ Whisper's confidences, and a final summary. Any worker exception is logged
 with its traceback and stops the run cleanly. Stop with Esc / Enter / q /
 Ctrl+C / SIGTERM; the session folder is always kept.
 
-Console output has two modes: the default shows the INFO log (and DEBUG with
---verbose), while --quiet shows only the transcript lines. Both write the same
-full DEBUG log to disk.
+Console output has four modes, all writing the same full DEBUG log to disk:
+the default screen (mascot, live status line, transcript, warnings -- see ui.py),
+--log (INFO log lines), --verbose (DEBUG log lines) and --quiet (transcript only).
 """
 
 from __future__ import annotations
@@ -38,18 +38,64 @@ from pathlib import Path
 import numpy as np
 
 from . import __version__
-from .audio_capture import AudioCapture, AudioDeviceError, format_devices, list_input_devices, pick_samplerate, resolve_device
+from .audio_capture import LOSS_WARN, AudioCapture, AudioDeviceError, format_devices, list_input_devices, pick_samplerate, resolve_device
 from .config import DEFAULT_CONFIG_PATH, PROJECT_DIR, Config, load_config
 from .context_window import ContextWindow
 from . import logging_utils
 from .logging_utils import cleanup_crash_file, log_environment, setup_logging
 from .resampler import Resampler, float_to_pcm16, pcm16_to_float
-from .session import SessionWriter
+from .session import SessionWriter, fmt_time
+from .ui import Console, dbfs
 from .utterance_builder import Utterance, UtteranceBuilder, UtteranceParams
 from .vad_gate import VadGate
-from .whisper_backend import WhisperBackend, looks_hallucinated
+from .vocabulary import hotwords, load_vocabulary
+from .whisper_backend import LOW_MEMORY_MB, WhisperBackend, available_mb, describe_hogs, looks_hallucinated
 
 logger = logging.getLogger(__name__)
+QUIET_RMS = 0.015     # loudest speech frame below this (-36 dBFS) and the VAD fragments speech
+MIN_SPEECH_FRAMES = 10  # judge the level only after this many VAD speech frames (0.3 s): silence before
+                        # anyone talks is not a quiet mic, and one bump's peak (0.093 over speech at
+                        # -48 dBFS, 2026-09-20) says nothing about the speech
+TARGET_RMS = 0.07     # for the loudest speech frame, about -23 dBFS; average speech then sits near -30
+HEADROOM = 0.9        # never let the suggested gain drive the loudest sample into clipping
+
+
+def frame_rms(frame: bytes) -> float:
+    samples = np.frombuffer(frame, dtype="<i2").astype(np.float32) / 32768.0
+    return float(np.sqrt(np.mean(samples * samples))) if samples.size else 0.0
+
+
+class SpeechLevel:
+    """Loudest RMS over frames the VAD called speech: the level that decides whether speech survives."""
+
+    def __init__(self) -> None:
+        self.loudest = 0.0
+        self.frames = 0
+
+    def add(self, frame: bytes) -> None:
+        self.frames += 1
+        self.loudest = max(self.loudest, frame_rms(frame))
+
+    @property
+    def judged(self) -> bool:
+        return self.frames >= MIN_SPEECH_FRAMES
+
+    @property
+    def too_quiet(self) -> bool:
+        return self.judged and self.loudest < QUIET_RMS
+
+
+def suggest_gain(peak: float, rms: float) -> int:
+    """Software gain that lifts speech to a usable level without clipping.
+
+    Keyed off RMS, not peak: a single door slam or mic bump sets the peak and
+    would otherwise suggest a gain far too small for the actual speech.
+    """
+    if rms <= 0.0:
+        return 0
+    by_rms = TARGET_RMS / rms
+    by_peak = HEADROOM / peak if peak > 0 else by_rms
+    return max(1, int(min(by_rms, by_peak)))
 HEARTBEAT_S = 5.0
 
 
@@ -75,9 +121,11 @@ def log_config(config: Config) -> None:
 
 
 class Pipeline:
-    def __init__(self, config: Config, session_name: str | None = None, quiet: bool = False) -> None:
+    def __init__(self, config: Config, session_name: str | None = None, quiet: bool = False,
+                 console: Console | None = None) -> None:
         self.config = config
         self.quiet = quiet
+        self.console = console
         self.params = build_utterance_params(config)
         logger.debug(
             "Utterance params: frame=%d ms (%d samples, %d bytes), start after %d speech frames, "
@@ -87,13 +135,23 @@ class Pipeline:
             self.params.max_utterance_s, self.params.preroll_ms,
         )
         self.stop_event = threading.Event()
+        self.audio_done = threading.Event()
         self.failed = False
-        # In quiet mode the console shows no log lines, so the transcript must print
-        # regardless of config; it is the only thing the user would otherwise see.
-        self.print_text = config.print_transcript or self.quiet
+        self._level_peak = 0.0
+        self._level_rms = 0.0
+        self._speech = SpeechLevel()
+        self._level_warned = False
+        self._loss_warned = False
+        self._builder = None
+        # Quiet mode and the default screen show no log lines, so the transcript must
+        # print regardless of config; it is the only thing the user would otherwise see.
+        self.print_text = config.print_transcript or self.quiet or console is not None
         self.audio_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=config.input_queue_max_blocks)
         self.utterance_queue: "queue.Queue[tuple[Utterance, float]]" = queue.Queue()
         self.context = ContextWindow(config.context_enabled, config.context_max_chars)
+        self.vocabulary = load_vocabulary(config.vocabulary_path) if config.vocabulary_file else []
+        logger.info("Vocabulary: %d term(s) from %s%s", len(self.vocabulary), config.vocabulary_path,
+                    f": {', '.join(self.vocabulary[:12])}{' ...' if len(self.vocabulary) > 12 else ''}" if self.vocabulary else "")
         self.backend = WhisperBackend(
             model_name=config.model_name,
             model_dir=config.model_path,
@@ -105,6 +163,8 @@ class Pipeline:
             vad_filter=config.vad_filter,
             require_cuda=config.require_cuda,
             cpu_fallback_model=config.cpu_fallback_model,
+            temperature=config.temperature,
+            hotwords=hotwords(self.vocabulary),
         )
         self.session = SessionWriter(config.sessions_path, session_name)
         self._capture: AudioCapture | None = None
@@ -136,10 +196,26 @@ class Pipeline:
             self.session.next_index, start_s, end_s, end_s - start_s, speech_ms, peak, rms, utt.continued, queued,
         )
         logger.debug("  prompt=%r", prompt)
-        result = self.backend.transcribe(audio, initial_prompt=prompt)
-        reason = looks_hallucinated(
-            result, self.config.no_speech_prob_max, self.config.avg_logprob_min, self.config.compression_ratio_max
-        )
+        self._ui(busy=True, queued=queued)
+        try:
+            result = self.backend.transcribe(audio, initial_prompt=prompt)
+            reason = self._judge(result)
+            if reason and reason.startswith("compression_ratio") and (prompt or self.backend.hotwords):
+                # A prompt can push Whisper into a loop ("viv, viv, viv, ..." from the vocabulary in
+                # the 2026-10-10 benchmark), and the filter then drops the whole utterance, correct
+                # half included. One plain decode usually recovers it; only failures pay for it.
+                # Drop only the vocabulary when there is one: decoding with no context at all
+                # invited stock hallucinations ("For more information, visit www.FEMA.gov").
+                with_vocab = bool(self.backend.hotwords)
+                logger.info("Utterance looped (%s); decoding once more without the %s.", reason,
+                            "vocabulary" if with_vocab else "context prompt")
+                plain = self.backend.transcribe(audio, initial_prompt=prompt if with_vocab else None, use_hotwords=False)
+                plain.latency_s += result.latency_s
+                plain_reason = self._judge(plain)
+                if plain_reason is None or not plain_reason.startswith("compression_ratio"):
+                    result, reason = plain, plain_reason
+        finally:
+            self._ui(busy=False, queued=self.utterance_queue.qsize())
         record = self.session.add_utterance(
             start_s=start_s,
             end_s=end_s,
@@ -148,9 +224,9 @@ class Pipeline:
             result=result,
             dropped_reason=reason,
             save_clip=self.config.save_clips,
-            print_text=self.print_text,
         )
-        if reason is None:
+        self._show_transcript(start_s, result.text, reason)
+        if reason is None and result.avg_logprob >= self.config.context_min_logprob:
             self.context.add(result.text)
         self.stats["utterances_transcribed"] += 1
         self.stats["utterances_kept" if reason is None else "utterances_dropped"] += 1
@@ -164,11 +240,32 @@ class Pipeline:
             result.text[:120], result.avg_logprob, result.no_speech_prob, result.compression_ratio,
             len(result.words), result.segment_count,
         )
+        self._ui(kept=self.stats["utterances_kept"], dropped=self.stats["utterances_dropped"])
         if rtf > 1.0:
-            logger.warning(
-                "Transcription slower than real time (RTF %.2f). On CPU consider model.name = base.en; "
-                "on Jetson make sure ctranslate2 reports a CUDA device (bash run.sh --doctor).", rtf,
-            )
+            if self.backend.active_device == "cpu":
+                hint = "On CPU consider model.name = base.en; on Jetson make sure ctranslate2 reports a CUDA device (bash run.sh --doctor)."
+            else:
+                hint = ("On CUDA this is usually Whisper struggling with weak or noisy input, not the GPU: "
+                        "check the level with bash go.sh mic.")
+            logger.warning("Transcription slower than real time (RTF %.2f). %s", rtf, hint)
+
+    def _judge(self, result) -> str | None:  # noqa: ANN001
+        return looks_hallucinated(result, self.config.no_speech_prob_max, self.config.avg_logprob_min,
+                                  self.config.compression_ratio_max)
+
+    def _ui(self, **fields) -> None:
+        if self.console is not None:
+            self.console.update(**fields)
+
+    def _show_transcript(self, start_s: float, text: str, reason: str | None) -> None:
+        stamp = fmt_time(start_s)
+        if self.console is not None:
+            if reason is None:
+                self.console.transcript(stamp, text)
+            else:
+                self.console.dropped(stamp, text[:60], reason)
+        elif reason is None and self.print_text:
+            print(f"[{stamp}] {text}", flush=True)
 
     def _fail(self, where: str, exc: BaseException) -> None:
         logger.exception("%s failed: %s: %s", where, type(exc).__name__, exc)
@@ -181,6 +278,8 @@ class Pipeline:
         try:
             resampler = Resampler(input_sr, self.config.target_sample_rate)
             gate, builder = self._make_gate_and_builder()
+            self._builder = builder
+            gain = self.config.input_gain
             frame_bytes = self.params.frame_bytes
             delay_s = resampler.delay_samples / input_sr
             logger.debug("Resampler %d->%d Hz backend=%s delay=%d samples (%.1f ms)",
@@ -203,9 +302,19 @@ class Pipeline:
                 except queue.Empty:
                     continue
                 blocks += 1
+                raw_peak = float(np.max(np.abs(block))) if block.size else 0.0
+                if self.console is not None:
+                    self._ui(level_db=max(dbfs(min(1.0, raw_peak * gain)), self.console.status.level_db - 3.0))
+                if gain != 1.0 and block.size:
+                    block = np.clip(block * gain, -1.0, 1.0)
                 if not first_block_logged:
                     first_block_logged = True
-                    logger.info("First audio block received: %d samples, peak=%.4f", block.size, float(np.max(np.abs(block))) if block.size else 0.0)
+                    logger.info("First audio block received: %d samples, peak=%.4f%s",
+                                block.size, raw_peak,
+                                f" (x{gain:g} gain -> {float(np.max(np.abs(block))):.4f})" if gain != 1.0 else "")
+                self._level_peak = max(self._level_peak, raw_peak)
+                if block.size:
+                    self._level_rms = max(self._level_rms, float(np.sqrt(np.mean(block.astype(np.float64) ** 2))) / gain)
                 resampled = resampler.process(block)
                 block_pcm = float_to_pcm16(resampled)
                 pending += block_pcm
@@ -215,6 +324,8 @@ class Pipeline:
                     frame = bytes(pending[:frame_bytes])
                     del pending[:frame_bytes]
                     is_speech = gate.is_speech(frame)
+                    if is_speech:
+                        self._speech.add(frame)
                     beat_frames += 1
                     beat_speech += is_speech
                     self.stats["frames"] += 1
@@ -223,6 +334,7 @@ class Pipeline:
                     if builder.in_speech and not was_in_speech:
                         logger.info("speech started at %.2fs", builder.frame_index * self.params.frame_duration_ms / 1000 - delay_s)
                     was_in_speech = builder.in_speech
+                    self._ui(speaking=builder.in_speech)
                     if utt is not None:
                         self.stats["utterances_detected"] += 1
                         logger.info(
@@ -234,6 +346,7 @@ class Pipeline:
                         )
                         self.utterance_queue.put((utt, delay_s))
                         self.stats["max_utterance_queue"] = max(self.stats["max_utterance_queue"], self.utterance_queue.qsize())
+                        self._ui(queued=self.utterance_queue.qsize())
             tail = builder.flush()
             if tail is not None:
                 logger.info("Flushing %.2fs of speech still buffered at shutdown", (tail.end_frame - tail.start_frame) * self.params.frame_duration_ms / 1000)
@@ -243,6 +356,8 @@ class Pipeline:
             logger.info("Audio worker finished: %d blocks processed", blocks)
         except BaseException as exc:  # noqa: BLE001
             self._fail("audio worker", exc)
+        finally:
+            self.audio_done.set()
 
     def _heartbeat(self, frames: int, speech: int, in_speech: bool) -> None:
         cap = self._capture
@@ -253,6 +368,20 @@ class Pipeline:
             mic, frames, pct, in_speech, self.utterance_queue.qsize(),
             self.stats["utterances_transcribed"], self.stats["utterances_kept"], self.stats["utterances_dropped"],
         )
+        if self._speech.too_quiet and not self._level_warned:
+            self._level_warned = True
+            logger.warning(
+                "Input is very quiet (loudest speech %s; VAD hears %.0f%% speech). Much of what you say "
+                "may be discarded before it reaches Whisper. Raise the capture gain "
+                "(alsamixer -c 0, F4) or set audio.input_gain in config.toml, then check with "
+                "bash go.sh mic.",
+                _dbfs(self._speech.loudest), pct,
+            )
+        self._ui(worried=self._speech.too_quiet)
+        if cap is not None and not self._loss_warned and cap.audio_loss() > LOSS_WARN and cap.samples_received > 10 * cap.samplerate:
+            self._loss_warned = True
+            logger.warning("The mic is losing %.0f%% of the audio (input overflows); words will be cut. "
+                           "Raise audio.latency in config.toml (currently %s).", 100 * cap.audio_loss(), self.config.latency)
         if cap is not None and cap.blocks_received and cap.last_block_at and time.monotonic() - cap.last_block_at > 2.0:
             logger.warning("No audio block for %.1fs: the mic stream appears stalled (USB disconnect? device grabbed by another app?)",
                            time.monotonic() - cap.last_block_at)
@@ -262,7 +391,7 @@ class Pipeline:
     def _transcription_worker(self) -> None:
         try:
             logger.debug("Transcription worker started")
-            while not self.stop_event.is_set() or not self.utterance_queue.empty():
+            while not (self.audio_done.is_set() and self.utterance_queue.empty()):
                 try:
                     utt, offset = self.utterance_queue.get(timeout=0.1)
                 except queue.Empty:
@@ -278,8 +407,34 @@ class Pipeline:
 
     # --- microphone run --------------------------------------------------------
     def run_microphone(self) -> int:
+        console = self.console
+        if console is not None:
+            console.banner(f"Emote  v{__version__}", [
+                f"model {self.config.model_name} · mic matching {self.config.microphone!r}",
+                f"session {self.session.name}"
+                + (f" · {len(self.vocabulary)} vocabulary words" if self.vocabulary else ""),
+            ])
+            console.update(detail=self.config.model_name)
+            console.attach_logging(logging_utils.CONSOLE_HANDLER)
+            console.start()
+        try:
+            return self._run_microphone()
+        finally:
+            if console is not None:
+                console.stop()
+
+    def _run_microphone(self) -> int:
         logger.info("=== microphone run: session %s ===", self.session.name)
+        free_mb = available_mb()
+        if free_mb < LOW_MEMORY_MB:
+            # The Orin's GPU shares this memory. At 1.6-2.0 GB available (VSCodium alone held
+            # 2.1 GB, 2026-10-10) CUDA allocations failed and had to be retried.
+            logger.warning("Only %.1f GB of memory is free, and the GPU shares it. Biggest users: %s. "
+                           "Close what you do not need (an editor or browser) for a smooth session.",
+                           free_mb / 1024, describe_hogs())
         self.backend.load()
+        self._ui(detail="and stretching")
+        self.backend.warm_up()
         devices = list_input_devices()
         device = resolve_device(self.config.microphone, devices)
         if self.config.capture_sample_rate:
@@ -302,6 +457,9 @@ class Pipeline:
             self.backend.active_model, self.backend.active_device, self.backend.active_compute,
             self.config.beam_size, self.config.word_timestamps, self.config.vad_filter,
         )
+        if self.console is not None:
+            self.console.note(f"model {self.backend.active_model} on {self.backend.active_device} ({self.backend.active_compute})"
+                              f" · mic [{device}] {dev_name} at {input_sr} Hz")
         wav_rate = input_sr if self.config.session_wav_source == "device" else self.config.target_sample_rate
         if self.config.save_session_wav:
             self.session.start_wav(wav_rate)
@@ -309,6 +467,7 @@ class Pipeline:
             mode="microphone",
             microphone={"selector": self.config.microphone, "index": device, "name": dev_name},
             capture_sample_rate=input_sr,
+            input_gain=self.config.input_gain,
             session_wav_sample_rate=wav_rate if self.config.save_session_wav else None,
             model={"name": self.backend.active_model, "device": self.backend.active_device, "compute_type": self.backend.active_compute},
             config=_config_summary(self.config),
@@ -332,14 +491,18 @@ class Pipeline:
 
         audio_thread.start()
         trans_thread.start()
-        if interactive:
-            threading.Thread(target=self._control_loop, name="control", daemon=True).start()
+        control_thread = threading.Thread(target=self._control_loop, name="control", daemon=True) if interactive else None
+        if control_thread is not None:
+            control_thread.start()
         t_start = time.monotonic()
         try:
             capture.start()
             hint = "Press Esc or Enter to stop (q and Ctrl+C also work)." if interactive else "Stop with Ctrl+C or SIGTERM."
             logger.info("Session %s running. %s", self.session.name, hint)
-            if self.quiet:
+            self._ui(phase="running", started=time.monotonic())
+            if self.console is not None:
+                self.console.note(hint)
+            elif self.quiet:
                 print(f"Listening. {hint} Transcript:", flush=True)
             while not self.stop_event.is_set():
                 time.sleep(0.2)
@@ -348,11 +511,14 @@ class Pipeline:
         finally:
             logger.info("Stopping after %.1fs ...", time.monotonic() - t_start)
             self.stop_event.set()
+            self._ui(phase="stopping", speaking=False)
             capture.stop()
             audio_thread.join(timeout=5.0)
             if audio_thread.is_alive():
                 logger.warning("Audio worker did not stop within 5s")
             self._drain_transcriptions(trans_thread)
+            if control_thread is not None:
+                control_thread.join(timeout=1.0)
             self._finish()
         return 1 if self.failed else 0
 
@@ -422,13 +588,38 @@ class Pipeline:
 
     def _finish(self) -> None:
         self._log_summary()
-        if self.session.is_empty():
-            self.session.close()
-            logger.info("Nothing was captured; removing empty session folder %s", self.session.dir)
-            _rmtree(self.session.dir)
+        if self.discard_if_empty():
             return
         self.session.close()
         self._copy_run_log()
+        self._farewell()
+
+    def discard_if_empty(self) -> bool:
+        """Remove the session folder when nothing was captured. True if it was removed."""
+        if not self.session.dir.exists() or not self.session.is_empty():
+            return False
+        self.session.close()
+        logger.info("Nothing was captured; removing empty session folder %s", self.session.dir)
+        _rmtree(self.session.dir)
+        if self.console is not None:
+            self.console.note("Nothing was captured, so no session folder was kept.")
+        return True
+
+    def _farewell(self) -> None:
+        console = self.console
+        if console is None:
+            return
+        s = self.stats
+        console.note(f"Saved {self.session.dir}")
+        console.note(f"{s['utterances_kept']} heard, {s['utterances_dropped']} dropped, "
+                     f"{s['transcribe_seconds']:.1f}s of transcribing for {s['audio_seconds']:.1f}s of audio")
+        builder = self._builder
+        if builder is not None and builder.discarded_short:
+            console.note(f"{builder.discarded_short} short burst(s) too brief to transcribe (min_speech_ms={self.params.min_speech_ms})")
+        if self._speech.too_quiet:
+            gain = suggest_gain(self._level_peak, self._speech.loudest / self.config.input_gain)
+            console.alert(logging.WARNING, f"The mic was too quiet (loudest speech {_dbfs(self._speech.loudest)}). Raise the capture gain "
+                          f"(alsamixer -c 0), or set audio.input_gain = {gain} in config.toml. Check with: bash go.sh mic")
 
     def _copy_run_log(self) -> None:
         run_log = logging_utils.RUN_LOG
@@ -450,6 +641,24 @@ class Pipeline:
         logger.info("  transcription time : %.1fs for %.1fs of audio (RTF %.2f), max queue depth %d",
                     s["transcribe_seconds"], s["audio_seconds"], s["transcribe_seconds"] / s["audio_seconds"] if s["audio_seconds"] else 0.0, s["max_utterance_queue"])
         logger.info("  errors             : %d", s["errors"])
+        builder = self._builder
+        if builder is not None and builder.discarded_short:
+            logger.info(
+                "  discarded          : %d short speech burst(s), %.1fs total, below min_speech_ms=%d",
+                builder.discarded_short, builder.discarded_speech_ms / 1000, self.params.min_speech_ms,
+            )
+        if self._level_peak > 0.0:
+            gain_hint = ""
+            if self._speech.too_quiet:
+                suggested = suggest_gain(self._level_peak, self._speech.loudest / self.config.input_gain)
+                gain_hint = (f"  TOO QUIET -- raise the capture gain, or set audio.input_gain = {suggested} "
+                             f"in config.toml (current {self.config.input_gain:g})")
+            elif self._level_peak * self.config.input_gain > 0.95:
+                gain_hint = "  CLIPPING -- lower the capture gain or audio.input_gain"
+            logger.info("  input level        : peak %.4f (%s), loudest rms %.4f (%s), loudest speech %s over %d speech frames%s",
+                        self._level_peak, _dbfs(self._level_peak),
+                        self._level_rms, _dbfs(self._level_rms),
+                        _dbfs(self._speech.loudest), self._speech.frames, gain_hint)
         if self._capture is not None:
             logger.info("  mic                : %s", self._capture.health())
         logger.info("  model used         : %s on %s (%s)", self.backend.active_model, self.backend.active_device, self.backend.active_compute)
@@ -546,20 +755,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--doctor", action="store_true", help="Print an environment health report and exit.")
     p.add_argument("--mic-check", nargs="?", type=float, const=10.0, default=None, metavar="SECONDS",
                    help="Record for a few seconds (default 10) and show a live level meter plus what the VAD hears, then exit.")
-    p.add_argument("--verbose", "-v", action="store_true", help="Show DEBUG log lines on the console too (they are always in logs/run_*.log).")
+    p.add_argument("--log", action="store_true", help="Show the INFO log on the console instead of the mascot screen.")
+    p.add_argument("--verbose", "-v", action="store_true", help="Show DEBUG log lines on the console instead of the mascot screen (they are always in logs/run_*.log).")
     p.add_argument("--quiet", "-q", action="store_true", help="Print only the transcript; no log lines on the console (logs/run_*.log is unchanged).")
     p.add_argument("--version", action="version", version=f"transcriber {__version__}")
     return p.parse_args(argv)
 
 
+def console_mode(args: argparse.Namespace) -> str:
+    """ui (mascot screen, the default for microphone runs) | log | verbose | quiet."""
+    if args.quiet:
+        return "quiet"
+    if args.verbose:
+        return "verbose"
+    if args.log or args.wav:
+        return "log"
+    return "ui"
+
+
+CONSOLE_LEVELS = {"quiet": None, "verbose": logging.DEBUG, "log": logging.INFO, "ui": logging.WARNING}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    run_log = setup_logging(PROJECT_DIR / "logs", verbose=args.verbose, console=not args.quiet)
+    mode = console_mode(args)
+    run_log = setup_logging(PROJECT_DIR / "logs", console_level=CONSOLE_LEVELS[mode])
     logger.info("transcriber %s starting: argv=%s", __version__, sys.argv[1:] if argv is None else argv)
     logger.info("Full DEBUG log for this run: %s", run_log)
     rc = 1
     try:
-        rc = _dispatch(args)
+        rc = _dispatch(args, mode)
     except (AudioDeviceError, FileNotFoundError, ValueError, RuntimeError) as exc:
         logger.error("%s", exc)
         logger.debug("traceback:", exc_info=True)
@@ -588,14 +813,13 @@ def mic_check(config: Config, seconds: float) -> int:
     frame_bytes = gate.frame_bytes
 
     audio_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=config.input_queue_max_blocks)
-    capture = AudioCapture(audio_queue, device, input_sr, blocksize, config.latency)
+    capture = AudioCapture(audio_queue, device, input_sr, blocksize, config.latency_value)
     dev_name = next((d["name"] for d in devices if d["index"] == device), "system default")
-    print(f"Listening on [{device}] {dev_name} at {input_sr} Hz for {seconds:.0f}s. Speak normally.\n")
+    gain_note = f", audio.input_gain = {config.input_gain:g}" if config.input_gain != 1.0 else ""
+    print(f"Listening on [{device}] {dev_name} at {input_sr} Hz for {seconds:.0f}s{gain_note}. Speak normally.\n")
 
     peak_all = 0.0
-    sum_sq = 0.0
-    n_samples = 0
-    speech_frames = 0
+    speech = SpeechLevel()
     total_frames = 0
     pending = b""
     capture.start()
@@ -606,42 +830,52 @@ def mic_check(config: Config, seconds: float) -> int:
                 block = audio_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
+            if config.input_gain != 1.0 and block.size:
+                block = np.clip(block * config.input_gain, -1.0, 1.0)
             peak = float(np.max(np.abs(block))) if block.size else 0.0
             peak_all = max(peak_all, peak)
-            sum_sq += float(np.sum(block.astype(np.float64) ** 2))
-            n_samples += block.size
-            pending += float_to_pcm16(resampler.process(block)).tobytes()
+            pending += float_to_pcm16(resampler.process(block))
             while len(pending) >= frame_bytes:
                 frame, pending = pending[:frame_bytes], pending[frame_bytes:]
                 total_frames += 1
                 if gate.is_speech(frame):
-                    speech_frames += 1
+                    speech.add(frame)
             bars = min(40, int(peak * 200))
             print(f"\r  level [{'#' * bars:<40}] peak {peak:.4f}", end="", flush=True)
     finally:
+        print(flush=True)
         capture.stop()
 
-    rms = (sum_sq / n_samples) ** 0.5 if n_samples else 0.0
-    speech_pct = 100.0 * speech_frames / total_frames if total_frames else 0.0
-    print(f"\n\n  peak      : {peak_all:.4f} ({_dbfs(peak_all)})")
-    print(f"  rms       : {rms:.4f} ({_dbfs(rms)})")
+    speech_pct = 100.0 * speech.frames / total_frames if total_frames else 0.0
+    print(f"\n  peak      : {peak_all:.4f} ({_dbfs(peak_all)})")
+    print(f"  speech    : {_dbfs(speech.loudest)} at its loudest (aim for about -25 to -10 dBFS)")
     print(f"  VAD       : {speech_pct:.1f}% of {total_frames} frames counted as speech "
           f"(aggressiveness {config.vad_aggressiveness})")
-    print(f"  overflows : {capture.overflow_count}")
+    print(f"  lost audio: {100 * capture.audio_loss():.1f}% ({capture.overflow_count} overflows, audio.latency = {config.latency})")
 
-    if peak_all < 0.01:
-        print("\n  VERDICT: too quiet. The VAD will hear silence and nothing will be transcribed.")
-        print("  Raise the capture gain, then re-check:")
-        print("    alsamixer -c 0      # F4 for capture, arrow up, Esc")
+    if capture.audio_loss() > LOSS_WARN:
+        print(f"\n  VERDICT: the mic stream is dropping audio ({100 * capture.audio_loss():.0f}%), so words get cut out.")
+        print("  Raise audio.latency in config.toml (for example \"1.0\") and run this check again.")
+        return 1
+    if not speech.judged:
+        print("\n  VERDICT: no speech heard. Speak normally for the whole check, and check the mic is the")
+        print("  selected device (bash run.sh --list-devices) and not muted (alsamixer -c 0).")
+        return 1
+    if speech.too_quiet:
+        gain = config.input_gain
+        suggested = suggest_gain(peak_all / gain, speech.loudest / gain)
+        print("\n  VERDICT: too quiet. The VAD fragments speech this weak into bursts shorter than")
+        print(f"  min_speech_ms = {config.min_speech_ms}, and they are discarded before Whisper sees them.")
+        print("  Fix it at the source first:")
+        print("    alsamixer -c 0                   # F4 for capture, arrow up, Esc")
         print("    amixer -c 0 sset Mic 80% cap     # or 'Capture' on some devices")
-        print("  Also check the mic is not muted and that you are close to it.")
+        if suggested:
+            print(f"  If the hardware gain is already at maximum, set in config.toml:")
+            print(f"    [audio]")
+            print(f"    input_gain = {suggested}       # software gain, current {config.input_gain:g}")
         return 1
     if peak_all > 0.95:
         print("\n  VERDICT: clipping. Lower the capture gain or move back from the mic.")
-        return 1
-    if speech_pct < 5.0:
-        print("\n  VERDICT: signal is present but the VAD barely triggers.")
-        print(f"  Speak during the whole check, or lower vad.aggressiveness below {config.vad_aggressiveness}.")
         return 1
     print("\n  VERDICT: levels look usable. Run: bash run.sh")
     return 0
@@ -653,7 +887,7 @@ def _dbfs(x: float) -> str:
     return "-inf dBFS" if x <= 0 else f"{20 * math.log10(x):.0f} dBFS"
 
 
-def _dispatch(args: argparse.Namespace) -> int:
+def _dispatch(args: argparse.Namespace, mode: str) -> int:
     if args.list_devices:
         listing = format_devices(list_input_devices())
         logger.info("Input devices:\n%s", listing)
@@ -668,14 +902,19 @@ def _dispatch(args: argparse.Namespace) -> int:
     log_environment(logger)
     config = load_config(args.config)
     log_config(config)
-    pipeline = Pipeline(config, session_name=args.name or (Path(args.wav).stem if args.wav else None), quiet=args.quiet)
-    if args.wav:
-        wav_path = Path(args.wav)
-        if not wav_path.exists():
-            logger.error("Audio file not found: %s", wav_path)
-            return 1
-        return pipeline.run_wav_file(wav_path)
-    return pipeline.run_microphone()
+    console = Console() if mode == "ui" and not args.wav else None
+    pipeline = Pipeline(config, session_name=args.name or (Path(args.wav).stem if args.wav else None),
+                        quiet=args.quiet, console=console)
+    try:
+        if args.wav:
+            wav_path = Path(args.wav)
+            if not wav_path.exists():
+                logger.error("Audio file not found: %s", wav_path)
+                return 1
+            return pipeline.run_wav_file(wav_path)
+        return pipeline.run_microphone()
+    finally:
+        pipeline.discard_if_empty()
 
 
 if __name__ == "__main__":

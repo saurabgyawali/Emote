@@ -61,3 +61,38 @@ def test_preroll_included():
     out = feed(b, SILENCE, False, 3)
     assert len(out) == 1
     assert out[0].start_frame == 0
+
+
+LOUD = b"\x00\x20" * 480
+QUIET = b"\x10\x00" * 480
+
+
+def test_long_speech_is_cut_at_the_quietest_frame_and_loses_nothing():
+    params = UtteranceParams(sample_rate=16000, frame_duration_ms=30, speech_start_frames=3, silence_end_ms=900,
+                             min_speech_ms=90, max_utterance_s=1.5, preroll_ms=0, split_window_ms=600)
+    b = UtteranceBuilder(params)
+    frames = [(LOUD, True)] * 40
+    frames[44 - 8] = (QUIET, False)          # a brief pause 8 frames before the 50-frame limit
+    frames += [(LOUD, True)] * 40
+    out = []
+    for frame, flag in frames:
+        u = b.add_frame(frame, flag)
+        if u is not None:
+            out.append(u)
+    tail = b.flush()
+    chunks = out + [tail]
+    first = chunks[0]
+    assert first.continued
+    assert first.end_frame - first.start_frame < 50          # cut early, at the pause
+    assert first.pcm[-params.frame_bytes:] == QUIET          # the pause ends the chunk
+    for a, c in zip(chunks, chunks[1:]):
+        assert c.start_frame == a.end_frame
+    total = sum(len(u.pcm) for u in chunks)
+    assert total == (chunks[-1].end_frame - chunks[0].start_frame) * params.frame_bytes
+    assert sum(u.speech_frames for u in chunks) == sum(1 for _, f in frames if f)
+
+
+def test_long_speech_without_a_pause_is_cut_at_the_limit():
+    b = UtteranceBuilder(PARAMS)
+    out = feed(b, SPEECH, True, 25)
+    assert out[0].end_frame - out[0].start_frame == 20

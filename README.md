@@ -18,6 +18,8 @@ speech emotion recognition, with no audio ever leaving the device.
 
 **Pipeline:** microphone → voice activity detection → local Whisper → per-utterance features → model
 
+**Emotion model (stage 3):** the training pipeline is in [`pipeline/`](pipeline/README.md) — start with **[NEXT_STEPS.md](NEXT_STEPS.md)** on a GPU machine.
+
 [Features](#-features) • [How It Works](#-how-it-works) • [Getting Started](#-getting-started) • [Roadmap](#-roadmap) • [Contributing](#-contributing)
 
 </div>
@@ -34,6 +36,7 @@ speech emotion recognition, with no audio ever leaving the device.
 - [Tech Stack](#-tech-stack)
 - [Project Structure](#-project-structure)
 - [Getting Started](#-getting-started)
+- [Modes of Operation](#-modes-of-operation)
 - [Moving to the Jetson](#-moving-to-the-jetson)
 - [Configuration](#-configuration)
 - [Diagnostics](#-diagnostics)
@@ -219,81 +222,197 @@ Emote/
 - A **USB microphone**.
 - Internet access for the install only.
 
-### Install on the Jetson
-
-```bash
-cd Emote/transcriber
-bash install.sh                 # idempotent; safe to re-run, completed steps are skipped
-bash install.sh --interactive   # ...plus a wizard for mic / device / model
-```
-
-`install.sh` runs seven steps, each skipped when already satisfied: apt packages → virtualenv →
-pip requirements → **CUDA CTranslate2** → Whisper model → unit tests → health report.
-Everything is tee'd to `logs/install_<timestamp>.log`.
-
-Useful flags: `--skip-cuda-build`, `--only-cuda`, `--only-model`, `--ct2-jobs 2` (if the compile is OOM-killed), `--debug`.
-
-### Run a session — one command
+### First run on a new machine
 
 ```bash
 cd Emote
-bash go.sh                      # update the code, check the machine, record, bundle the logs
-bash go.sh --name interview     # ...and label the session folder
+bash go.sh install      # venv, requirements, CUDA CTranslate2, model, tests, health report
+bash go.sh mic          # confirm the microphone is loud enough
+bash go.sh              # record
 ```
 
-That is the whole loop. `go.sh` is a thin wrapper: it pulls the latest code (when this is a
-git checkout with a remote), runs the health report, starts the recording session, and
-collects the diagnostics tarball when you stop. Each step can be run on its own:
+That is the whole setup. Details of every flag are in
+[Installation modes](#installation-modes) below.
 
-| Command | Does |
-|---------|------|
-| `bash go.sh update` | `git pull --ff-only`, or tells you how to get the code across. |
-| `bash go.sh check` | Health report (`run.sh --doctor`). |
-| `bash go.sh mic` | 10-second level meter: is the microphone loud enough for the VAD? |
-| `bash go.sh record` | A recording session only. |
-| `bash go.sh --quiet` | The full loop, but only the transcript on screen while recording. |
-| `bash go.sh logs` | Diagnostics tarball only. |
-| `bash go.sh features` | Feature extraction over the sessions already recorded. |
-| `bash go.sh copy` | Tarball for a machine with no network. |
+---
 
-### The underlying commands
+## 🎛 Modes of operation
+
+Everything is driven by two scripts. `go.sh` (in `Emote/`) is the one to remember — it chains
+the steps in the right order. `run.sh` (in `Emote/transcriber/`) is the transcriber itself,
+and every `go.sh` step is a thin wrapper around it.
+
+### The default: one command, the whole loop
+
+```bash
+cd Emote
+bash go.sh
+```
+
+In order: **update** the code → **check** the machine → **record** a session → **bundle** the
+logs. If the check fails it asks before recording. If there is no virtualenv it offers to
+install one. If the session crashes it still bundles the logs. At the end it prints the path
+of the single file to carry back.
+
+Arguments pass through to the recorder, so `bash go.sh --quiet --name interview1` records a
+labelled session with transcript-only output.
+
+### `go.sh` step by step
+
+Run any step alone when you do not want the whole loop:
+
+| Command | What it does | When you want it |
+|---|---|---|
+| `bash go.sh update` | `git pull --ff-only`, or explains how to copy the code across when there is no remote. | Before a session, to be sure you are running the newest code. |
+| `bash go.sh install` | Runs `install.sh`: venv, pip, CUDA CTranslate2, model, tests, health report. Idempotent. | First run on a machine, or after the venv is lost. |
+| `bash go.sh check` | Health report only (`run.sh --doctor`). | "Is this machine ready?" Confirms CUDA, model, mic. |
+| `bash go.sh mic` | 10-second level meter with a verdict. | **Nothing gets transcribed.** Almost always capture gain. |
+| `bash go.sh record` | A recording session only. | You already checked, just want to record. |
+| `bash go.sh logs` | Builds the diagnostics tarball only. Add `--with-audio` to include the recordings. | After a crash, or to re-send evidence. |
+| `bash go.sh features` | `run_pipeline.sh --no-record`: extracts features from sessions already on disk. | After recording, to get `features.csv`. |
+| `bash go.sh copy` | Builds `../Emote-to-copy/` — code only, ~240 KB. `--tar` makes a tarball with the model instead. | Moving code to the Jetson by hand. |
+
+### Console modes while recording
+
+The same session, four ways to watch it. All four write the identical full DEBUG
+log to `transcriber/logs/<day>/<hour>/run_<timestamp>.log` — the mode only changes what you see.
+
+| Mode | Command | On screen |
+|---|---|---|
+| **Default** | `bash run.sh` | The mascot screen: a small listening character with a live status line (face, mic level in dB, heard/dropped counts, clock), transcript lines scrolling above it, dropped lines in dim grey, warnings in yellow. Plain text, no status line, when output is not a terminal or `NO_COLOR` is set. |
+| **Log** | `bash run.sh --log` | INFO log: device chosen, audio plan, Whisper plan, a heartbeat every 5 s, one line per utterance. |
+| **Quiet** | `bash run.sh --quiet` | One line, then only transcript lines: `[00:00:02.210] Hello there.` Nothing else. |
+| **Verbose** | `bash run.sh --verbose` | Everything, including DEBUG: every device, every sample rate tried, every VAD transition. |
+
+Use the default to talk to it, quiet to copy text out, log or verbose when something is wrong
+and you want to watch it happen. All work through `go.sh` (`bash go.sh --log`).
+
+### Stopping a session
+
+**Esc**, **Enter**, **q**, or **Ctrl+C** — all four stop cleanly. Esc works as a single
+keypress when you are at a terminal; in a pipe or under `nohup`, Enter is needed.
+
+Stopping is always safe. Every utterance is written to disk the moment it is transcribed, the
+session folder is finalised on the way out, queued utterances are drained first, and `go.sh`
+bundles the logs afterwards either way. There is no "too early".
+
+### Input modes
+
+| Input | Command | Notes |
+|---|---|---|
+| **Microphone** | `bash run.sh` | The real path. Needs PortAudio and a USB mic. |
+| **Audio file** | `bash run.sh --wav clip.wav --name test` | Same pipeline, no microphone. This is how the pipeline is exercised on a machine without PortAudio. |
+
+### Inspection modes (these exit immediately, they do not record)
+
+| Command | Shows |
+|---|---|
+| `bash run.sh --doctor` | Python, packages, ctranslate2 CUDA device count, config validity, model presence, every input device, which one `audio.microphone` resolves to, and an OK / PROBLEMS verdict. Also written to the run log. |
+| `bash run.sh --list-devices` | Just the input devices, with indices. Use it to fill in `audio.microphone`. |
+| `bash run.sh --mic-check` | Records for 10 s (`--mic-check 30` for longer) with a live level bar, then reports peak and RMS in dBFS, what percentage of frames the VAD counted as speech, and a verdict: too quiet, clipping, VAD barely triggering, or usable. |
+
+`--mic-check` is the one to reach for when a session produces little or no transcript. A peak
+below 0.02 means the VAD chops your speech into bursts shorter than `vad.min_speech_ms`, and
+they are thrown away before Whisper sees them — you speak for two minutes and get five lines.
+Raise the capture gain with `alsamixer -c 0` (F4 for capture, arrow up, Esc) or
+`amixer -c 0 sset Mic 80% cap`, then check again. If the hardware gain is already at maximum,
+set `[audio] input_gain` in `config.toml` to the value `--mic-check` suggests; it is applied in
+software before the VAD, and is computed from the speech RMS with headroom so it cannot clip.
+
+The run summary reports the same thing after the fact:
+
+```
+  discarded          : 13 short speech burst(s), 5.4s total, below min_speech_ms=300
+  input level        : peak 0.0094 (-40 dBFS), loudest rms 0.0042 (-48 dBFS)
+                       TOO QUIET -- raise the capture gain, or set audio.input_gain = 9
+```
+
+### Installation modes
 
 ```bash
 cd Emote/transcriber
-bash run.sh --list-devices      # find the mic; put a name substring in config.toml
-bash run.sh --doctor            # environment health report
-bash run.sh --mic-check         # 10s level meter + VAD verdict (run this if nothing transcribes)
-bash run.sh                     # talk; Esc / Enter / q / Ctrl+C stops and saves everything
-bash run.sh --quiet             # transcript lines only on screen
-bash run.sh --verbose           # full DEBUG log on screen
-bash run.sh --name interview    # label the session folder
+bash install.sh                 # everything, idempotent, safe to re-run
+bash install.sh --interactive   # ...plus a wizard for mic / device / model
 ```
 
-### Run over a file (no microphone needed)
+Seven steps, each skipped when already satisfied: apt packages → virtualenv → pip requirements
+→ **CUDA CTranslate2** → Whisper model → unit tests → health report. Tee'd to
+`logs/<day>/<hour>/install_<timestamp>.log`.
+
+| Flag | Effect |
+|---|---|
+| `--only-cuda` | Just the CUDA CTranslate2 step. |
+| `--only-model` | Just the Whisper model download. |
+| `--skip-cuda-build` | Stay on the CPU wheel. |
+| `--ct2-jobs 2` | Fewer parallel compile jobs, if the build is OOM-killed. |
+| `--venv DIR` | Use or create a virtualenv elsewhere (network shares reject venv symlinks). |
+| `--debug` | Trace every shell command into the log. |
+
+The CUDA step is smart about what already exists, in this order: a cached wheel in
+`ct2/wheels/` (seconds) → the C++ library already installed in `/usr/local` (a few minutes,
+Python binding only) → a reusable build tree → a full compile (30–45 minutes).
+
+### Pipeline modes (both stages at once)
 
 ```bash
-bash run.sh --wav some_speech.wav --name test
+cd Emote
+bash run_pipeline.sh                  # record -> features -> baseline training in the background
+bash run_pipeline.sh --wav clip.wav   # same, from a file
+bash run_pipeline.sh --no-record      # skip recording; use the sessions already on disk
+bash run_pipeline.sh --skip-train     # stop after features.csv
+bash run_pipeline.sh --foreground-train   # wait for training instead of backgrounding it
 ```
 
-This is the path to use on a development machine: it exercises the whole pipeline without touching PortAudio.
+`ANALYSIS_PYTHON=/path/to/python` overrides the interpreter used for stage 2.
 
-### Extract features
+### Stage 2 on its own
 
 ```bash
 cd Emote/emotion_analysis
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python scripts/extract_features.py        # -> results/features.csv, appends only new utterances
-.venv/bin/python scripts/extract_features.py --force
-.venv/bin/python scripts/summarize_sessions.py
-.venv/bin/python scripts/train_baseline.py
+.venv/bin/python scripts/extract_features.py          # -> results/features.csv (appends new utterances only)
+.venv/bin/python scripts/extract_features.py --force  # recompute everything
+.venv/bin/python scripts/summarize_sessions.py        # per-session table
+.venv/bin/python scripts/train_baseline.py            # unsupervised k-means + PCA plot
 ```
 
-### Everything at once
+### Where everything lands
 
-```bash
-cd Emote
-bash run_pipeline.sh            # transcriber -> features -> baseline training in the background
+Logs are filed by the day and hour they were written, because a flat folder became
+unreadable after a single morning of debugging:
+
 ```
+transcriber/logs/
+├── 2026-09-20/
+│   ├── 07/
+│   │   └── run_20260920_074039.log
+│   └── 09/
+│       ├── run_20260920_092054.log
+│       ├── install_20260920_092010.log
+│       ├── ct2_build_20260920_092012.log
+│       └── crash_20260920_092054.log     (only after a native crash)
+├── diagnostics/
+│   └── 2026-09-20/
+│       └── 09/
+│           └── diagnostics_jetson-desktop_20260920_092103.tar.gz
+├── latest.log            → the newest run log
+├── install_latest.log    → the newest install log
+└── transcriber.log       INFO history across every run
+```
+
+| Path | What | In git? |
+|---|---|---|
+| `transcriber/sessions/<timestamp>/` | transcript, utterances.jsonl, clips, session.wav, session.json, run.log | No |
+| `transcriber/logs/<day>/<hour>/run_<ts>.log` | Full DEBUG log of one run | No |
+| `transcriber/logs/diagnostics/<day>/<hour>/*.tar.gz` | The bundles to carry back | No |
+| `transcriber/logs/<day>/<hour>/install_<ts>.log`, `ct2_build_<ts>.log` | Install and CUDA build output | No |
+| `transcriber/logs/latest.log`, `transcriber.log` | Newest run log pointer, and the INFO history | No |
+| `emotion_analysis/results/features.csv` | Feature table | No |
+| `emotion_analysis/results/model/` | Baseline model, clusters, PCA plot, STATUS.json | No |
+| `../Emote-to-copy/` | Code to carry to the Jetson | No (outside the repo) |
+
+Nothing produced by a run is ever committed: recordings and transcripts stay out of git by
+design.
 
 ### Tests
 
@@ -324,7 +443,7 @@ bash go.sh copy --tar           # -> ../Emote-<date>.tar.gz including the model
 | 3 | Jetson | Drop it **on top of** `~/Developer/RASL/Emote`, merge/replace |
 | 4 | Jetson | `cd ~/Developer/RASL/Emote && bash go.sh` |
 | 5 | Your computer | Take the one tarball it names at the end |
-| 6 | Server | Drop it in `transcriber/logs/` |
+| 6 | Server | Drop it in `transcriber/logs/diagnostics/<day>/<hour>/` |
 
 If the Jetson ever gets this repo directly (it does have internet — the installer reaches
 PyPI), `bash go.sh update` will `git pull` instead and steps 1–3 disappear.
@@ -341,7 +460,7 @@ and are deliberately not in the copy.
 transcriber/diagnostics_<hostname>_<timestamp>.tar.gz
 ```
 
-It is written to `transcriber/logs/`. Drag that one file back into the same folder on the
+It is written to `transcriber/logs/diagnostics/<day>/<hour>/`. Drag that one file back into the same folder on the
 server. It contains the run logs, the health report, session transcripts and metadata, and
 the system, audio, CUDA and kernel facts. Audio is excluded unless you run
 `bash go.sh logs --with-audio`. `transcriber/logs/` is gitignored, so nothing dropped there
@@ -371,6 +490,7 @@ It **keeps** `ct2/wheels/`, so a previously built aarch64 wheel travels with the
 | `audio.microphone` | `"USB"` | Name substring (preferred) or device index. |
 | `audio.capture_sample_rate` | `"auto"` | Try 16 kHz first, then the device default. |
 | `audio.block_duration_ms` | `100` | Larger blocks = fewer input overflows. |
+| `audio.input_gain` | `1.0` | Software gain applied before VAD and Whisper. Only for a mic whose hardware gain is already maxed; `--mic-check` suggests a value. |
 | `vad.aggressiveness` | `2` | 0 (lax) … 3 (strict). |
 | `vad.silence_end_ms` | `700` | Trailing silence that ends an utterance. |
 | `vad.max_utterance_s` | `15` | Long monologues are chunked here. |
@@ -394,12 +514,13 @@ memory pressure, kernel messages, and which `libctranslate2` the Python package 
 
 | Log | Content |
 |-----|---------|
-| `logs/run_<ts>.log` | DEBUG trail of one run: environment, full config, every device and rate tried, heartbeats, per-utterance Whisper output, final summary. |
+| `logs/<day>/<hour>/run_<ts>.log` | DEBUG trail of one run: environment, full config, every device and rate tried, heartbeats, per-utterance Whisper output, final summary. |
 | `logs/latest.log` | Points at the newest run log. |
 | `logs/transcriber.log` | INFO history across all runs. |
-| `logs/install_<ts>.log` | Full output of every `install.sh` run. |
-| `logs/ct2_build_<ts>.log` | Full CTranslate2 compile output. |
-| `logs/crash_<ts>.log` | Only present after a native crash; contains the thread stacks. |
+| `logs/<day>/<hour>/install_<ts>.log` | Full output of every `install.sh` run. |
+| `logs/<day>/<hour>/ct2_build_<ts>.log` | Full CTranslate2 compile output. |
+| `logs/<day>/<hour>/crash_<ts>.log` | Only present after a native crash; contains the thread stacks. |
+| `logs/diagnostics/<day>/<hour>/*.tar.gz` | The bundles to carry back; previous bundles are never packed into a new one. |
 
 ---
 
@@ -411,10 +532,11 @@ memory pressure, kernel messages, and which `libctranslate2` the Python package 
 - [x] Unsupervised baseline with silhouette scoring.
 - [ ] 🏷 Collect labelled sessions — self-report per session or per utterance.
 - [ ] 📈 Supervised baseline on the per-speaker-normalised feature table, replacing k-means.
-- [ ] 🤖 Fine-tune a pretrained speech emotion encoder (wav2vec2 / HuBERT) on the clips.
-- [ ] 🔤 Fuse acoustic and lexical models using the transcript text.
-- [ ] 🎯 Report categories as probabilities so overlapping states stay visible.
-- [ ] 🗜 Compress and quantise the model for real-time inference on the Orin Nano.
+- [x] 🧪 Training pipeline: WavLM audio + transcript + prosody towers, gated fusion, 10-experiment suite, analysis figures, ONNX export ([pipeline/](pipeline/README.md)); smoke-tested, awaiting a GPU.
+- [ ] 🤖 Train it on RAVDESS, CREMA-D, TESS, MELD (+ IEMOCAP, MSP-Podcast once licensed) — [NEXT_STEPS.md](NEXT_STEPS.md).
+- [x] 🔤 Fuse acoustic and lexical models using the transcript text (built; to be trained).
+- [x] 🎯 Report categories as probabilities so overlapping states stay visible (`emotions.jsonl`).
+- [x] 🗜 Compress and quantise the model for inference on the Orin Nano (int8 ONNX export, parity-checked).
 - [ ] 📡 Live emotion readout during a session, not just offline.
 - [ ] 👥 Multi-speaker diarisation.
 
@@ -453,6 +575,7 @@ Shell scripts should pass `bash -n`, Python changes should keep the unit tests g
 - `sounddevice` cannot import without PortAudio, so the live path does not run on machines lacking it — use `run.sh --wav` there.
 - The hallucination filter thresholds are untested against real noisy speech and will need tuning from collected sessions.
 - The CUDA CTranslate2 build takes 30–45 minutes on an Orin Nano from cold, and can be OOM-killed at high job counts — use `--ct2-jobs 2`.
+- **CUDA can run out of memory on the Orin.** The GPU shares system RAM, so a browser or IDE left open can leave too little for the model: `CUDA failed with error out of memory`. Close what you can, check `tegrastats`, or use a smaller `model.name`. The transcriber falls back to the CPU automatically.
 - Virtualenv creation fails on some network shares (symlink I/O errors); create the venv on local disk.
 - **There is no emotion model yet.** Stage 2 produces features and an unsupervised baseline; no labels have been collected.
 

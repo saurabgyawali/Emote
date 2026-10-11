@@ -1,0 +1,4 @@
+# Frozen WavLM, learned layer mix + pooling: what the pretrained representation knows without fine-tuning.
+inherit: ../base.yaml
+model:
+  audio: {finetune_layers: 0}

@@ -1,0 +1,4 @@
+# Encoder comparison: wav2vec 2.0-Base instead of WavLM-Base-Plus, otherwise E3.
+inherit: ../base.yaml
+model:
+  audio: {encoder: facebook/wav2vec2-base}

@@ -83,7 +83,6 @@ class SessionWriter:
         result: TranscriptResult,
         dropped_reason: str | None,
         save_clip: bool,
-        print_text: bool,
     ) -> dict[str, Any]:
         with self._lock:
             self._count += 1
@@ -128,11 +127,8 @@ class SessionWriter:
             logger.debug("utterances.jsonl += #%d (%d words)", idx, len(record["words"]))
             if dropped_reason is None:
                 self._kept += 1
-                stamp = _fmt_time(start_s)
                 with (self.dir / "transcript.txt").open("a", encoding="utf-8") as fh:
-                    fh.write(f"[{stamp}] {result.text}\n")
-                if print_text:
-                    print(f"[{stamp}] {result.text}", flush=True)
+                    fh.write(f"[{fmt_time(start_s)}] {result.text}\n")
             else:
                 self._dropped += 1
                 logger.info("Dropped utterance %d (%s): %r", idx, dropped_reason, result.text[:60])
@@ -159,7 +155,7 @@ class SessionWriter:
         return self._count == 0 and self._wav_frames == 0
 
 
-def _fmt_time(seconds: float) -> str:
+def fmt_time(seconds: float) -> str:
     m, s = divmod(max(0.0, seconds), 60.0)
     h, m = divmod(int(m), 60)
     return f"{h:02d}:{m:02d}:{s:06.3f}"

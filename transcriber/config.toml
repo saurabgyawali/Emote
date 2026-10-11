@@ -14,14 +14,27 @@ microphone = "USB"
 capture_sample_rate = "auto"
 target_sample_rate = 16000      # what VAD + Whisper receive; do not change
 block_duration_ms = 100         # larger blocks = fewer input overflows
+# Software gain applied to every captured block before VAD, Whisper and the
+# session WAV. Use it only when the hardware capture gain (alsamixer -c 0, F4)
+# is already at maximum and speech still peaks below ~0.02: the VAD then breaks
+# speech into bursts shorter than vad.min_speech_ms and they are thrown away.
+# `bash run.sh --mic-check` measures the level and suggests a value.
+input_gain = 1.0                # 1.0 = off; 20 turns a -48 dBFS mic into about -22 dBFS
 input_queue_max_blocks = 100
-latency = "high"                # "high" | "low" | seconds, e.g. "0.2"
+# Input buffer in seconds. "high" gave a 100 ms buffer on the Jetson's USB mic, one block
+# deep, and every run lost ~15% of its audio to overflows. 0.5 s costs nothing here: the
+# transcript already waits for the end of each utterance.
+latency = "0.5"                 # "high" | "low" | seconds
 
 [vad]
 aggressiveness = 2              # 0 (lax) .. 3 (strict)
 frame_duration_ms = 30          # 10 | 20 | 30
 speech_start_frames = 3         # consecutive speech frames that start an utterance
-silence_end_ms = 700            # trailing silence that ends an utterance
+# Trailing silence that ends an utterance. 1000 ms keeps a sentence with a short pause in
+# one piece; Whisper is more accurate with the whole sentence. Benchmark 2026-10-10
+# (73 LibriSpeech utterances replayed through this pipeline): 700 ms -> 6.5% WER, 1000 -> 5.6%;
+# 1300 was inconsistent. Costs 0.3 s before each line appears.
+silence_end_ms = 1000
 min_speech_ms = 300             # shorter blips (coughs, clicks) are discarded
 max_utterance_s = 15            # long monologues are chunked at this length
 preroll_ms = 300                # audio kept before speech starts
@@ -32,11 +45,21 @@ download_dir = "models"
 device = "auto"                 # "auto" = cuda if the CUDA CTranslate2 build is present, else cpu
 compute_type = "int8_float16"   # cuda: int8_float16 | float16 ; cpu uses int8 automatically
 language = "en"
-beam_size = 1                   # 1 = fastest
+# 5 beams instead of greedy: 6.5% -> 6.1% WER alone, 5.1% together with silence_end_ms = 1000,
+# for ~25% more decode time (Jetson RTF ~0.25 leaves room). Falls back to 1 if memory runs out.
+beam_size = 5
 word_timestamps = true          # per-word times (needed for speaking-rate features)
 vad_filter = true               # faster-whisper's Silero VAD trims non-speech inside an utterance
 require_cuda = false            # true = refuse to run on CPU
 cpu_fallback_model = "base.en"  # used when CUDA is unavailable and the model is heavy
+# 0 = decode once. Anything above 0 lets Whisper re-decode a doubtful utterance up to six
+# times at rising randomness; on a quiet mic that turned a 1 s job into 13 s (Jetson,
+# 2026-09-20) and the retries only produced repetition loops. The [filter] below drops
+# doubtful results instead.
+temperature = 0.0
+# Names and jargon Whisper should prefer (hotwords). Edit the file; "" turns it off.
+# bash go.sh vocab suggests words from your own sessions.
+vocabulary_file = "vocabulary.txt"
 
 [filter]
 # Whisper invents text on noise ("Thank you.", "you"). Utterances failing these
@@ -48,6 +71,10 @@ compression_ratio_max = 2.4
 [context]
 enabled = true                  # feed recent text back as Whisper's prompt
 max_chars = 400
+# Only confident text goes into the prompt. A misheard word fed back as context gets
+# repeated: on 2026-10-10 "Gweeg Fox" (logprob -0.72) entered the prompt and the next
+# two utterances came back as "Gweeg and Brown fox" and "Gweeg...".
+min_logprob = -0.5
 
 [output]
 sessions_dir = "sessions"       # each run -> sessions/<timestamp>/

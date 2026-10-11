@@ -1,0 +1,8 @@
+# What `run.sh train` runs. Each experiment x seed is one isolated subprocess; finished
+# runs (matching config fingerprint) are skipped, so the suite resumes after interruption.
+seeds: [0, 1, 2]
+groups:
+  core:      [E1_prosody_only, E2_audio_frozen, E3_audio_finetune, E4_audio_text, E5_audio_text_prosody, X1_acted_to_natural]
+  extended:  [E6_hubert_finetune, E7_wav2vec2_finetune, X2_leave_out_crema]
+  large:     [E8_wavlm_large_full]
+default_groups: [core]

@@ -1,0 +1,25 @@
+# Words Whisper should prefer: names, jargon, anything it keeps mishearing.
+# One per line, most important first (only the first ~400 characters are used).
+# Everyday English does not belong here: Whisper knows it, and every extra word
+# nudges ambiguous audio toward this list.
+#
+# bash go.sh vocab          suggests words from your own past sessions
+# bash go.sh vocab --write  adds the suggestions here
+
+Saurab
+Emote
+Jetson
+Orin Nano
+NVIDIA
+CUDA
+GPU
+Whisper
+faster-whisper
+transcriber
+go.sh
+config.toml
+alsamixer
+Python
+GitHub
+Ubuntu
+Claude

@@ -6,6 +6,7 @@ speaking rate and pauses, and so hallucinated segments can be filtered.
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import time
@@ -15,6 +16,9 @@ from pathlib import Path
 import numpy as np
 
 logger = logging.getLogger(__name__)
+OOM_ATTEMPTS = 4
+OOM_RETRY_S = 1.0      # waits 1, 2, 3 s: the kernel frees cached pages within seconds
+LOW_MEMORY_MB = 3000   # below this at start, CUDA allocations on the Orin start failing
 
 
 @dataclass
@@ -36,6 +40,42 @@ class TranscriptResult:
     segment_count: int = 0
 
 
+def _memory_summary() -> str:
+    try:
+        fields = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, _, rest = line.partition(":")
+            fields[key] = int(rest.split()[0]) // 1024
+        return f"{fields.get('MemAvailable', 0)} MB available of {fields.get('MemTotal', 0)} MB"
+    except Exception:  # noqa: BLE001
+        return "memory unknown"
+
+
+def available_mb() -> int:
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) // 1024
+    return 0
+
+
+def memory_hogs(n: int = 3, proc: Path = Path("/proc")) -> list[tuple[str, int]]:
+    """Biggest programs by resident memory, summed per name (VSCodium runs as 7 processes)."""
+    totals: dict[str, int] = {}
+    for status in proc.glob("[0-9]*/status"):
+        try:
+            fields = dict(line.split(":", 1) for line in status.read_text().splitlines() if ":" in line)
+            rss_kb = int(fields.get("VmRSS", "0 kB").split()[0])
+        except (OSError, ValueError):
+            continue
+        name = fields.get("Name", "?").strip()
+        totals[name] = totals.get(name, 0) + rss_kb // 1024
+    return sorted(totals.items(), key=lambda kv: -kv[1])[:n]
+
+
+def describe_hogs() -> str:
+    return ", ".join(f"{name} {mb / 1024:.1f} GB" for name, mb in memory_hogs())
+
+
 def _looks_like_cuda_problem(exc: Exception) -> bool:
     text = str(exc).lower()
     return any(k in text for k in ("cuda", "cublas", "cudnn", "gpu"))
@@ -46,8 +86,33 @@ def _is_missing_model_error(exc: Exception) -> bool:
     return any(k in text for k in ("cached snapshot", "local_files_only", "no such file", "could not find", "cannot find"))
 
 
-def _cpu_compute_type(requested: str) -> str:
-    return "int8" if requested in ("int8_float16", "float16", "int8_bfloat16", "bfloat16") else requested
+def supported_compute_types(device: str) -> set[str]:
+    try:
+        import ctranslate2
+
+        return set(ctranslate2.get_supported_compute_types(device))
+    except Exception:  # noqa: BLE001 - ctranslate2 missing or too old to ask
+        return set()
+
+
+def _cpu_compute_type(requested: str, supported: set[str] | None = None) -> str:
+    """A CPU compute type this build can actually run.
+
+    The source-built CTranslate2 on the Jetson has no efficient int8 backend
+    (built without Ruy/oneDNN), so the old unconditional "int8" made the CPU
+    fallback die with 'Requested int8 compute type, but the target device or
+    backend do not support efficient int8 computation' -- turning a recoverable
+    CUDA failure into a failed run (Jetson, 2026-09-20 09:20).
+    """
+    want = "int8" if requested in ("int8_float16", "float16", "int8_bfloat16", "bfloat16") else requested
+    if supported is None:
+        supported = supported_compute_types("cpu")
+    if not supported or want in supported:
+        return want
+    for candidate in ("int8", "int8_float32", "float32"):
+        if candidate in supported:
+            return candidate
+    return "float32"
 
 
 def _is_cpu_friendly(model_name: str) -> bool:
@@ -96,6 +161,8 @@ class WhisperBackend:
         vad_filter: bool = True,
         require_cuda: bool = False,
         cpu_fallback_model: str = "base.en",
+        temperature: float = 0.0,
+        hotwords: str | None = None,
     ) -> None:
         self.model_name = model_name
         self.model_dir = Path(model_dir)
@@ -107,6 +174,8 @@ class WhisperBackend:
         self.vad_filter = vad_filter
         self.require_cuda = require_cuda
         self.cpu_fallback_model = cpu_fallback_model
+        self.temperature = temperature
+        self.hotwords = hotwords
         self.active_model = model_name
         self.active_device = device
         self.active_compute = compute_type
@@ -138,9 +207,16 @@ class WhisperBackend:
                     "model.require_cuda = true but ctranslate2 reports no CUDA device. "
                     "Run: bash install.sh (it builds CUDA CTranslate2 on Jetson) or set require_cuda = false."
                 )
-        compute = self.compute_type if device == "cuda" else _cpu_compute_type(self.compute_type)
-        if device == "cpu" and compute != self.compute_type:
-            logger.info("compute_type %s is GPU-only; using %s on CPU.", self.compute_type, compute)
+        supported = supported_compute_types(device)
+        logger.info("compute types supported on %s: %s", device, sorted(supported) or "unknown")
+        if device == "cuda":
+            compute = self.compute_type if not supported or self.compute_type in supported else next(
+                (c for c in ("int8_float16", "float16", "float32") if c in supported), "float32"
+            )
+        else:
+            compute = _cpu_compute_type(self.compute_type, supported)
+        if compute != self.compute_type:
+            logger.info("compute_type %s is unavailable on %s; using %s.", self.compute_type, device, compute)
 
         try:
             self._model = self._build(WhisperModel, self.model_name, device, compute)
@@ -157,6 +233,17 @@ class WhisperBackend:
                 ) from exc
 
     def _load_cpu_fallback(self, whisper_model_cls, exc: Exception) -> None:
+        if "out of memory" in str(exc).lower():
+            # Orin shares one pool between CPU and GPU: whatever the desktop holds is
+            # unavailable to CUDA. Seen with 1.8 GB free of 7.6 GB (Jetson, 2026-09-20).
+            logger.error(
+                "CUDA ran out of memory loading '%s'. On Orin the GPU shares system RAM: %s",
+                self.model_name, _memory_summary(),
+            )
+            logger.error(
+                "Close other applications (browser, IDE, other Python processes), or use a "
+                "smaller model.name (base.en, tiny.en). `tegrastats` shows what is holding RAM."
+            )
         if self.require_cuda:
             raise RuntimeError(
                 f"model.require_cuda = true but CUDA is unusable ({exc}). Re-run bash install.sh "
@@ -211,20 +298,60 @@ class WhisperBackend:
             pass
         return model
 
+    def warm_up(self) -> None:
+        """One throwaway inference so CUDA kernels and weights are resident before the first utterance.
+
+        Runs with the VAD filter off: with it on, faster-whisper strips the silent
+        clip to nothing and returns in 0.04 s without ever running the model, which
+        made the earlier version of this a no-op.
+        """
+        if self._model is None:
+            return
+        t0 = time.monotonic()
+        try:
+            self.transcribe(np.zeros(16000, dtype=np.float32), vad_filter=False)
+            logger.info("Model warm-up finished in %.1fs", time.monotonic() - t0)
+        except Exception as exc:  # noqa: BLE001 - warm-up must never stop a run
+            logger.warning("Model warm-up failed (harmless, the first utterance will be slower): %s", exc)
+
     # --- inference ---------------------------------------------------------
-    def transcribe(self, audio: np.ndarray, initial_prompt: str | None = None) -> TranscriptResult:
+    def transcribe(self, audio: np.ndarray, initial_prompt: str | None = None, vad_filter: bool | None = None,
+                   use_hotwords: bool = True) -> TranscriptResult:
         if self._model is None:
             self.load()
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
-        logger.debug("whisper input: %d samples (%.2fs @16k), beam=%d vad_filter=%s word_timestamps=%s prompt_chars=%d",
-                     audio.size, audio.size / 16000, self.beam_size, self.vad_filter, self.word_timestamps, len(initial_prompt or ""))
+        vad_filter = self.vad_filter if vad_filter is None else vad_filter
+        logger.debug("whisper input: %d samples (%.2fs @16k), beam=%d vad_filter=%s word_timestamps=%s temperature=%s prompt_chars=%d",
+                     audio.size, audio.size / 16000, self.beam_size, vad_filter, self.word_timestamps, self.temperature, len(initial_prompt or ""))
         t0 = time.monotonic()
+        for attempt in range(1, OOM_ATTEMPTS + 1):
+            try:
+                # The last attempt drops to greedy decoding: five beams need more memory than one.
+                beam = self.beam_size if attempt < OOM_ATTEMPTS else 1
+                return self._decode(audio, initial_prompt, vad_filter, beam, self.hotwords if use_hotwords else None, t0)
+            except RuntimeError as exc:
+                if attempt == OOM_ATTEMPTS or "out of memory" not in str(exc).lower():
+                    raise
+                # Orin shares RAM between CPU and GPU, so a momentary squeeze from the desktop
+                # can fail one allocation (warm-up on 2026-10-10 19:26, 2.1 GB available) and
+                # succeed a second later; giving up would lose that utterance's text.
+                wait = OOM_RETRY_S * attempt
+                logger.warning("CUDA ran out of memory while transcribing (%s; biggest: %s); retrying in %.0fs (attempt %d of %d).",
+                               _memory_summary(), describe_hogs(), wait, attempt + 1, OOM_ATTEMPTS)
+                gc.collect()
+                time.sleep(wait)
+        raise AssertionError("unreachable")
+
+    def _decode(self, audio: np.ndarray, initial_prompt: str | None, vad_filter: bool, beam_size: int,
+                hotwords: str | None, t0: float) -> TranscriptResult:
         segments, info = self._model.transcribe(
             audio,
             language=self.language,
-            beam_size=self.beam_size,
-            vad_filter=self.vad_filter,
+            beam_size=beam_size,
+            vad_filter=vad_filter,
             word_timestamps=self.word_timestamps,
+            temperature=self.temperature,
+            hotwords=hotwords,
             initial_prompt=initial_prompt or None,
             condition_on_previous_text=False,
         )

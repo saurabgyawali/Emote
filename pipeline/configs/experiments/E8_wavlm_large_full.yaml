@@ -1,0 +1,7 @@
+# Upper bound: WavLM-Large (316 M) + text + prosody. Needs a >= 24 GB GPU; too big for the Jetson, but a teacher for distillation.
+inherit: ../base.yaml
+model:
+  audio: {encoder: microsoft/wavlm-large, finetune_layers: 6}
+  text: {enabled: true}
+  prosody: {enabled: true}
+train: {batch_size: 8, grad_accum: 4, lr_encoder: 1.0e-5}

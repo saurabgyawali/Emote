@@ -96,7 +96,7 @@ logs alone cannot show: USB devices, who holds the microphone, memory pressure, 
 messages, and which `libctranslate2` the Python package actually loads. Copy the tarball back
 to the machine where the code is being fixed.
 
-`bash run.sh --verbose` mirrors the DEBUG lines to the console. Warnings to
+`bash run.sh --log` shows the INFO log on the console and `--verbose` the DEBUG lines (the default screen shows only the mascot, transcript and warnings). Warnings to
 watch for in a run log: `SILENT?` (mic delivers zeros), `stream appears
 stalled` (USB dropped), `input overflow`, `RTF > 1` (slower than real time,
 usually CPU fallback), `DROPPED (...)` (hallucination filter).
@@ -108,3 +108,11 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m pytest -q tests
 bash run.sh --wav some_speech.wav
 ```
+
+## Personal vocabulary
+
+Names and jargon Whisper should prefer go in `vocabulary.txt`, one per line, most important
+first (only ~400 characters are used). `bash go.sh vocab` suggests words from your own
+recorded sessions; `bash go.sh vocab --write` appends them. Keep it to words you actually
+say: on a 2026-10-10 benchmark a list of the speakers' real names cut errors by 20-33%,
+while unrelated words did nothing either way.

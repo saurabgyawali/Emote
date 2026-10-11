@@ -1,0 +1,5 @@
+# The full model: audio + transcript + hand-crafted prosody, gated fusion. Candidate for the Jetson.
+inherit: ../base.yaml
+model:
+  text: {enabled: true}
+  prosody: {enabled: true}

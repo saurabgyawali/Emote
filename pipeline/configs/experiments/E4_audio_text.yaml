@@ -1,0 +1,4 @@
+# + transcript (text tower). Text can only help on natural speech (MELD, MSP-Podcast, IEMOCAP).
+inherit: ../base.yaml
+model:
+  text: {enabled: true}

@@ -1,0 +1,6 @@
+# Hand-crafted features only: the floor any neural model must beat, and the cheapest Jetson option.
+inherit: ../base.yaml
+model:
+  audio: {enabled: false}
+  prosody: {enabled: true}
+train: {lr_head: 2.0e-3, epochs: 40, patience: 8}

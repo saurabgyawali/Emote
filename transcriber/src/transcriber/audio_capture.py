@@ -18,6 +18,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 PREFERRED_RATES = (16000, 48000, 44100, 32000, 22050, 8000)
+LOSS_WARN = 0.02
 
 
 class AudioDeviceError(RuntimeError):
@@ -160,6 +161,7 @@ class AudioCapture:
         self.samples_received = 0
         self.first_block_at: float | None = None
         self.last_block_at: float | None = None
+        self._last_frames = 0
         self.peak_recent = 0.0
         self.status_flags: set[str] = set()
 
@@ -171,6 +173,7 @@ class AudioCapture:
         if self.first_block_at is None:
             self.first_block_at = now
         self.last_block_at = now
+        self._last_frames = frames
         self.blocks_received += 1
         self.samples_received += frames
         block = indata[:, 0].copy()
@@ -192,28 +195,61 @@ class AudioCapture:
 
     def start(self) -> None:
         sd = _sd()
-        logger.info(
-            "Opening mic stream: device=%s samplerate=%d blocksize=%d latency=%s dtype=float32 channels=1",
-            self.device, self.samplerate, self.blocksize, self.latency,
-        )
         try:
-            self._stream = sd.InputStream(
-                device=self.device,
-                samplerate=self.samplerate,
-                blocksize=self.blocksize,
-                channels=1,
-                dtype="float32",
-                latency=self.latency,
-                callback=self._callback,
-            )
-            self._stream.start()
+            self._open(sd, self.latency)
         except Exception as exc:  # noqa: BLE001
-            logger.error("InputStream failed: %s: %s", type(exc).__name__, exc)
-            raise AudioDeviceError(f"Could not open input device {self.device}: {exc}") from exc
+            if self.latency == "high":
+                logger.error("InputStream failed: %s: %s", type(exc).__name__, exc)
+                raise AudioDeviceError(f"Could not open input device {self.device}: {exc}") from exc
+            # A larger buffer must never cost a session: fall back to the setting that is
+            # known to open on the Jetson's USB mic, and say so.
+            logger.warning("Mic stream refused latency=%s (%s); retrying with latency=\"high\".", self.latency, exc)
+            self.latency = "high"
+            try:
+                self._open(sd, self.latency)
+            except Exception as exc2:  # noqa: BLE001
+                logger.error("InputStream failed: %s: %s", type(exc2).__name__, exc2)
+                raise AudioDeviceError(f"Could not open input device {self.device}: {exc2}") from exc2
         logger.info(
             "Mic stream active: actual samplerate=%.0f Hz, reported input latency=%.1f ms, active=%s",
             self._stream.samplerate, self._stream.latency * 1000.0, self._stream.active,
         )
+
+    def _open(self, sd, latency: str | float) -> None:  # noqa: ANN001
+        logger.info(
+            "Opening mic stream: device=%s samplerate=%d blocksize=%d latency=%s dtype=float32 channels=1",
+            self.device, self.samplerate, self.blocksize, latency,
+        )
+        stream = sd.InputStream(
+            device=self.device,
+            samplerate=self.samplerate,
+            blocksize=self.blocksize,
+            channels=1,
+            dtype="float32",
+            latency=latency,
+            callback=self._callback,
+        )
+        try:
+            stream.start()
+        except Exception:
+            stream.close()
+            raise
+        self._stream = stream
+
+    def audio_loss(self) -> float:
+        """Fraction of the time since the first block for which no samples arrived.
+
+        An input overflow means ALSA overwrote samples before PortAudio read them, and
+        "0 dropped" only covers the app-side queue. With a 100 ms buffer every Jetson run
+        silently lost 10-21% of its audio this way (2026-09-20 to 2026-10-10): 259 s of
+        wall time delivered 218 s of audio, which is what chopped words into "Gweeg Fox".
+        """
+        if self.first_block_at is None or self.last_block_at is None:
+            return 0.0
+        wall = self.last_block_at - self.first_block_at + self._last_frames / self.samplerate
+        if wall < 1.0:
+            return 0.0
+        return max(0.0, 1.0 - (self.samples_received / self.samplerate) / wall)
 
     def health(self) -> str:
         """One-line status for periodic heartbeats; resets the recent peak."""
@@ -223,7 +259,7 @@ class AudioCapture:
         level = "SILENT?" if peak < 1e-4 else f"peak={peak:.3f}"
         return (
             f"blocks={self.blocks_received} audio={self.samples_received / self.samplerate:.1f}s "
-            f"last_block={age * 1000:.0f}ms ago {level} overflow={self.overflow_count} "
+            f"last_block={age * 1000:.0f}ms ago {level} overflow={self.overflow_count} lost={100 * self.audio_loss():.1f}% "
             f"dropped={self.dropped_count} queue={self.audio_queue.qsize()}/{self.audio_queue.maxsize}"
         )
 
@@ -236,8 +272,8 @@ class AudioCapture:
         finally:
             self._stream = None
         logger.info(
-            "Mic stream closed: %d blocks, %.1fs audio, %d overflow(s), %d dropped, status flags=%s",
-            self.blocks_received, self.samples_received / self.samplerate, self.overflow_count,
+            "Mic stream closed: %d blocks, %.1fs audio, %.1f%% of the time lost, %d overflow(s), %d dropped, status flags=%s",
+            self.blocks_received, self.samples_received / self.samplerate, 100 * self.audio_loss(), self.overflow_count,
             self.dropped_count, sorted(self.status_flags) or "none",
         )
         if self.blocks_received == 0:
@@ -245,9 +281,11 @@ class AudioCapture:
                 "The microphone delivered NO audio blocks. Check the device is not in use by "
                 "another program (pulseaudio/pipewire), the USB cable, and audio.microphone in config.toml."
             )
-        if self.overflow_count:
+        if self.audio_loss() > LOSS_WARN:
             logger.warning(
-                "PortAudio reported %d input overflow(s); %d block(s) dropped app-side. "
-                "If frequent: set audio.block_duration_ms = 0 or audio.latency = \"high\".",
-                self.overflow_count, self.dropped_count,
+                "%.1f%% of the audio never arrived (%d input overflows): words were cut out of the recording. "
+                "Raise audio.latency in config.toml (currently %s), e.g. \"1.0\".",
+                100 * self.audio_loss(), self.overflow_count, self.latency,
             )
+        elif self.overflow_count:
+            logger.info("PortAudio reported %d input overflow(s), %.1f%% of the time lost.", self.overflow_count, 100 * self.audio_loss())

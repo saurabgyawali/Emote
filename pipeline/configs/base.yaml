@@ -1,0 +1,58 @@
+# Defaults for every experiment. An experiment file names this with `inherit: ../base.yaml`
+# and overrides only what it changes; the resolved config is saved with every run.
+seed: 0
+
+data:
+  manifest: manifests/manifest.csv        # relative to the data root ($EMOTE_DATA, default ~/emote_data)
+  prosody_table: features/prosody.parquet
+  train_datasets: auto                    # auto = every corpus in the manifest, minus heldout_datasets
+  heldout_datasets: []                    # never trained on; ALL their clips are scored (cross-corpus test)
+  max_train_seconds: 6.0                  # random crop while training
+  max_eval_seconds: 12.0                  # centre crop while evaluating
+  max_text_tokens: 64
+  augment: true
+  augmentation: {noise_snr_db: [10, 30], gain_db: [-6, 6], p_noise: 0.3}
+  sampler: dataset_class                  # dataset | dataset_class | none (see emotion_model/data.py)
+  sampler_power: 0.5
+  num_workers: 6
+
+model:
+  embed_dim: 256
+  dropout: 0.2
+  modality_dropout: 0.2
+  audio:
+    enabled: true
+    encoder: microsoft/wavlm-base-plus
+    finetune_layers: 4                    # top transformer layers trained; 0 = frozen encoder
+    spec_augment: true
+  text:
+    enabled: false
+    encoder: j-hartmann/emotion-english-distilroberta-base
+    finetune_layers: 2
+  prosody:
+    enabled: false
+    hidden: 128
+
+train:
+  epochs: 20
+  batch_size: 16
+  grad_accum: 2                           # effective batch 32
+  eval_batch_size: 16
+  lr_head: 1.0e-3
+  lr_encoder: 2.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  grad_clip: 1.0
+  precision: bf16                         # bf16 (Ampere or newer) | fp16 (older GPUs) | fp32
+  label_smoothing: 0.1
+  class_weight_power: 0.5
+  dim_loss_weight: 0.5
+  patience: 5                             # epochs without a better validation score
+  selection_metric: mean_dataset_ua       # on the validation split, mean over corpora
+  log_every: 25
+  keep_last_checkpoint: false             # the best checkpoint is always kept
+  max_steps: 0                            # >0 stops early (smoke tests)
+  limit_per_split: 0                      # >0 subsamples each split (smoke tests)
+
+inference:
+  classes: [neutral, happy, sad, angry, fear, disgust, surprise]

@@ -6,8 +6,9 @@ Files (under ``logs/``):
     latest.log                 symlink to the newest run log
     crash_<timestamp>.log      native crash dump (segfault in PortAudio / CTranslate2)
 
-Console shows INFO (or DEBUG with --verbose) on stderr; stdout stays clean for
-transcript text. Uncaught exceptions in any thread are logged with tracebacks.
+The console level is chosen per mode (WARNING for the default screen, INFO for
+--log, DEBUG for --verbose, none for --quiet) and goes to stderr; stdout stays
+clean for transcript text. Uncaught exceptions in any thread are logged with tracebacks.
 """
 
 from __future__ import annotations
@@ -23,15 +24,29 @@ from datetime import datetime
 from pathlib import Path
 
 RUN_LOG: Path | None = None
+CONSOLE_HANDLER: logging.Handler | None = None
 _CRASH_FILE = None
 
 
-def setup_logging(log_dir: Path, verbose: bool = False, console: bool = True) -> Path:
+def run_log_dir(log_dir: Path, when: datetime | None = None) -> Path:
+    """Per-run logs go in logs/<YYYY-MM-DD>/<HH>/ so a day's runs stay together.
+
+    A flat folder became unreadable fast: 15 run logs from one morning, in three
+    unrelated debugging sessions, with nothing but a timestamp to tell them apart.
+    """
+    when = when or datetime.now()
+    return log_dir / when.strftime("%Y-%m-%d") / when.strftime("%H")
+
+
+def setup_logging(log_dir: Path, console_level: int | None = logging.INFO) -> Path:
     """Configure root logging; returns the per-run DEBUG log path."""
-    global RUN_LOG, _CRASH_FILE
+    global RUN_LOG, CONSOLE_HANDLER, _CRASH_FILE
+    now = datetime.now()
     log_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_log = log_dir / f"run_{stamp}.log"
+    day_dir = run_log_dir(log_dir, now)
+    day_dir.mkdir(parents=True, exist_ok=True)
+    stamp = now.strftime("%Y%m%d_%H%M%S")
+    run_log = day_dir / f"run_{stamp}.log"
     RUN_LOG = run_log
 
     fmt = logging.Formatter(
@@ -43,11 +58,13 @@ def setup_logging(log_dir: Path, verbose: bool = False, console: bool = True) ->
     for handler in list(root.handlers):
         root.removeHandler(handler)
 
-    if console:
+    CONSOLE_HANDLER = None
+    if console_level is not None:
         ch = logging.StreamHandler(stream=sys.stderr)
-        ch.setLevel(logging.DEBUG if verbose else logging.INFO)
+        ch.setLevel(console_level)
         ch.setFormatter(fmt)
         root.addHandler(ch)
+        CONSOLE_HANDLER = ch
 
     history = logging.FileHandler(log_dir / "transcriber.log", encoding="utf-8")
     history.setLevel(logging.INFO)
@@ -65,7 +82,7 @@ def setup_logging(log_dir: Path, verbose: bool = False, console: bool = True) ->
     try:
         if latest.is_symlink() or latest.exists():
             latest.unlink()
-        latest.symlink_to(run_log.name)
+        latest.symlink_to(run_log.relative_to(log_dir))
     except OSError:
         try:
             latest.write_text(str(run_log) + "\n", encoding="utf-8")
@@ -77,7 +94,7 @@ def setup_logging(log_dir: Path, verbose: bool = False, console: bool = True) ->
 
     # Native crashes (segfaults inside PortAudio/CTranslate2) bypass Python
     # logging entirely; faulthandler writes the thread stacks to this file.
-    crash_path = log_dir / f"crash_{stamp}.log"
+    crash_path = day_dir / f"crash_{stamp}.log"
     _CRASH_FILE = crash_path.open("w", encoding="utf-8")
     faulthandler.enable(file=_CRASH_FILE, all_threads=True)
 

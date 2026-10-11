@@ -1,0 +1,7 @@
+# Cross-corpus: train on acted speech only, score on MELD (natural TV dialogue) it never saw.
+# The closest public proxy for 'trained on actors, used on a real person at the Jetson'.
+inherit: ../base.yaml
+data: {heldout_datasets: [meld]}
+model:
+  text: {enabled: true}
+  prosody: {enabled: true}

@@ -14,7 +14,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$HERE")"
 CT2_BUILD_ROOT="${CT2_BUILD_ROOT:-$(dirname "$PROJECT_DIR")/ct2}"
-OUT_DIR="$PROJECT_DIR"; WITH_AUDIO="no"; DRY="no"
+# Same day/hour filing as the run logs, so a bundle sits next to the logs it was built from.
+OUT_DIR="$PROJECT_DIR/logs/diagnostics/$(date +%Y-%m-%d)/$(date +%H)"; WITH_AUDIO="no"; DRY="no"
 while [ $# -gt 0 ]; do
   case "$1" in
     --with-audio) WITH_AUDIO="yes"; shift ;;
@@ -35,7 +36,7 @@ if [ "$DRY" = "yes" ]; then
   echo "  doctor.txt   output of run.sh --doctor and run.sh --list-devices"
   echo "  project/     config.toml, .venv_path, logs/, and per session: session.json, utterances.jsonl, transcript.txt, run.log"
   [ "$WITH_AUDIO" = "yes" ] && echo "  project/     plus session.wav and clips/ (--with-audio)"
-  echo "Output: $OUT_DIR/diagnostics_<host>_<timestamp>.tar.gz"
+  echo "Output: $OUT_DIR/diagnostics_<host>_<timestamp>.tar.gz (previous bundles are never packed into a new one)"
   exit 0
 fi
 
@@ -107,11 +108,16 @@ sh_run build.txt 'ls -la /usr/local/lib | grep -i ctranslate2'
 sh_run build.txt 'ldconfig -p | grep -Ei "ctranslate2|libcudnn|libcublas"'
 
 cp "$PROJECT_DIR/config.toml" "$PROJECT_DIR/.venv_path" "$W/project/" 2>/dev/null
-[ -d "$PROJECT_DIR/logs" ] && cp -r "$PROJECT_DIR/logs" "$W/project/logs"
+# Everything but the diagnostics folder: packing old bundles into a new one doubles
+# its size every time.
+if [ -d "$PROJECT_DIR/logs" ]; then
+  mkdir -p "$W/project/logs"
+  (cd "$PROJECT_DIR/logs" && tar -cf - --exclude=diagnostics . 2>/dev/null) | tar -C "$W/project/logs" -xf - 2>/dev/null
+fi
 for s in "$PROJECT_DIR"/sessions/*/; do
   [ -d "$s" ] || continue
   d="$W/project/sessions/$(basename "$s")"; mkdir -p "$d"
-  for f in session.json utterances.jsonl transcript.txt run.log; do [ -f "$s$f" ] && cp "$s$f" "$d/"; done
+  for f in session.json utterances.jsonl transcript.txt run.log emotions.jsonl emotions_summary.json; do [ -f "$s$f" ] && cp "$s$f" "$d/"; done
   [ "$WITH_AUDIO" = "yes" ] && cp -r "$s"clips "$s"session.wav "$d/" 2>/dev/null
 done
 

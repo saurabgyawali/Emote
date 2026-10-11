@@ -64,8 +64,8 @@ def test_session_writer_roundtrip(tmp_path):
     s.start_wav(44100)
     s.write_wav(b"\x00\x00" * 44100)
     res = TranscriptResult(text="hi there", words=[Word("hi", 0.0, 0.2, 0.9), Word("there", 0.3, 0.6, 0.8)], avg_logprob=-0.2, no_speech_prob=0.05, compression_ratio=1.1, latency_s=0.1)
-    rec = s.add_utterance(1.0, 2.0, 600, b"\x00\x00" * 16000, res, None, True, False)
-    s.add_utterance(3.0, 3.5, 300, b"\x00\x00" * 8000, TranscriptResult(text="you", no_speech_prob=0.9), "no_speech_prob", True, False)
+    rec = s.add_utterance(1.0, 2.0, 600, b"\x00\x00" * 16000, res, None, True)
+    s.add_utterance(3.0, 3.5, 300, b"\x00\x00" * 8000, TranscriptResult(text="you", no_speech_prob=0.9), "no_speech_prob", True)
     s.close()
     assert rec["words"][1]["start_s"] == 1.3
     lines = (s.dir / "utterances.jsonl").read_text().splitlines()
@@ -144,3 +144,153 @@ def test_dbfs_scale():
     assert _dbfs(0.0) == "-inf dBFS"
     assert _dbfs(1.0) == "0 dBFS"
     assert _dbfs(0.003).startswith("-50")   # the level seen on the silent Jetson run
+
+
+def test_run_log_dir_is_day_then_hour(tmp_path):
+    from datetime import datetime
+
+    from transcriber.logging_utils import run_log_dir
+
+    d = run_log_dir(tmp_path, datetime(2026, 9, 20, 9, 21, 3))
+    assert d == tmp_path / "2026-09-20" / "09"
+
+
+def test_cpu_compute_type_respects_what_the_build_supports():
+    from transcriber.whisper_backend import _cpu_compute_type
+
+    # The Jetson's source-built CTranslate2 has no efficient int8 CPU backend.
+    assert _cpu_compute_type("int8_float16", {"float32"}) == "float32"
+    assert _cpu_compute_type("int8_float16", {"int8", "float32"}) == "int8"
+    assert _cpu_compute_type("float32", {"float32"}) == "float32"
+    assert _cpu_compute_type("int8_float16", set()) == "int8"   # unknown: keep the old behaviour
+
+
+def test_builder_counts_discarded_short_bursts():
+    """Speech the VAD starts but that never reaches min_speech_ms must be counted."""
+    from transcriber.utterance_builder import UtteranceParams, UtteranceBuilder
+
+    params = UtteranceParams(frame_duration_ms=30, speech_start_frames=1, silence_end_ms=60,
+                             min_speech_ms=300, preroll_ms=0, max_utterance_s=15.0)
+    b = UtteranceBuilder(params)
+    frame = b"\x00\x00" * params.frame_samples
+    assert b.discarded_short == 0
+    for is_speech in (True, True, False, False, False):   # 60 ms of speech, then silence
+        b.add_frame(frame, is_speech)
+    assert b.discarded_short == 1
+    assert b.discarded_speech_ms == 60
+
+
+def test_input_gain_must_be_positive(tmp_path):
+    from transcriber.config import load_config
+
+    cfg = tmp_path / "c.toml"
+    cfg.write_text('[audio]\nmicrophone = "USB"\ninput_gain = 0\n', encoding="utf-8")
+    try:
+        load_config(cfg)
+    except ValueError as exc:
+        assert "input_gain" in str(exc)
+    else:
+        raise AssertionError("input_gain = 0 should be rejected")
+
+
+def test_input_gain_defaults_to_one(tmp_path):
+    from transcriber.config import load_config
+
+    cfg = tmp_path / "c.toml"
+    cfg.write_text('[audio]\nmicrophone = "USB"\n', encoding="utf-8")
+    assert load_config(cfg).input_gain == 1.0
+
+
+def test_suggest_gain_uses_rms_and_keeps_headroom():
+    from transcriber.main import suggest_gain
+
+    # The real Jetson recording: one loud bump at 0.094, speech rms 0.0042.
+    # Keyed off the peak this would suggest 2; the speech needs about 10.
+    assert suggest_gain(0.0943, 0.0042) == 9
+    # A peak close to full scale caps the gain no matter how quiet the rms.
+    assert suggest_gain(0.9, 0.001) == 1
+    assert suggest_gain(0.0, 0.0) == 0
+
+
+def test_warm_up_runs_the_model_without_the_vad_filter():
+    import numpy as np
+    from transcriber.whisper_backend import WhisperBackend
+
+    calls = []
+
+    class Info:
+        language, language_probability, duration, duration_after_vad = "en", 1.0, 1.0, 1.0
+
+    class FakeModel:
+        def transcribe(self, audio, **kwargs):
+            calls.append(kwargs)
+            return iter(()), Info()
+
+    backend = WhisperBackend("small.en", "models", vad_filter=True, temperature=0.0)
+    backend._model = FakeModel()
+    backend.warm_up()
+    assert calls and calls[0]["vad_filter"] is False
+    backend.transcribe(np.zeros(16000, dtype=np.float32))
+    assert calls[1]["vad_filter"] is True and calls[1]["temperature"] == 0.0
+
+
+def test_cuda_out_of_memory_is_retried_not_lost(monkeypatch):
+    import numpy as np
+    import transcriber.whisper_backend as wb
+
+    monkeypatch.setattr(wb, "OOM_RETRY_S", 0.0)
+
+    class Info:
+        language, language_probability, duration, duration_after_vad = "en", 1.0, 1.0, 1.0
+
+    class Seg:
+        start, end, avg_logprob, no_speech_prob, compression_ratio, text, words = 0.0, 1.0, -0.2, 0.0, 1.0, " hi", []
+
+    calls = []
+
+    class FlakyModel:
+        def transcribe(self, audio, **kwargs):
+            calls.append(kwargs["beam_size"])
+            if len(calls) == 1:
+                raise RuntimeError("CUDA failed with error out of memory")
+            return iter([Seg()]), Info()
+
+    backend = wb.WhisperBackend("small.en", "models", beam_size=5)
+    backend._model = FlakyModel()
+    assert backend.transcribe(np.zeros(16000, dtype=np.float32)).text == "hi"
+    assert calls == [5, 5]
+
+    class OutOfMemoryUntilGreedy:
+        def transcribe(self, audio, **kwargs):
+            calls.append(kwargs["beam_size"])
+            if kwargs["beam_size"] > 1:
+                raise RuntimeError("CUDA failed with error out of memory")
+            return iter([Seg()]), Info()
+
+    calls.clear()
+    backend._model = OutOfMemoryUntilGreedy()
+    assert backend.transcribe(np.zeros(16000, dtype=np.float32)).text == "hi"
+    assert calls == [5, 5, 5, 1]
+
+    class BrokenModel:
+        def transcribe(self, audio, **kwargs):
+            raise RuntimeError("some other failure")
+
+    backend._model = BrokenModel()
+    try:
+        backend.transcribe(np.zeros(16000, dtype=np.float32))
+        raise AssertionError("expected the non-memory error to propagate")
+    except RuntimeError as exc:
+        assert "other failure" in str(exc)
+
+
+def test_memory_hogs_sums_processes_by_name(tmp_path):
+    from transcriber.whisper_backend import memory_hogs
+
+    for pid, name, kb in [(1, "codium", 700000), (2, "codium", 400000), (3, "Xorg", 600000), (4, "bash", 4000)]:
+        d = tmp_path / str(pid)
+        d.mkdir()
+        (d / "status").write_text(f"Name:\t{name}\nVmRSS:\t   {kb} kB\n")
+    (tmp_path / "5").mkdir()
+    (tmp_path / "5" / "status").write_text("Name:\tkthreadd\n")
+    assert memory_hogs(2, tmp_path) == [("codium", 1073), ("Xorg", 585)]

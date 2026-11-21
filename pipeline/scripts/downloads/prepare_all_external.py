@@ -3,6 +3,7 @@
     python prepare_all_external.py                 # RAVDESS, CREMA-D, TESS, MELD + core encoders
     python prepare_all_external.py --skip-meld     # without the 10.9 GB MELD download
     python prepare_all_external.py --extended-models --large-model
+    python prepare_all_external.py --esd           # + ESD, once its licence form has been emailed
     python prepare_all_external.py --dry-run
 
 Licensed corpora (IEMOCAP, MSP-Podcast) cannot be fetched by script: see NEXT_STEPS.md.
@@ -22,6 +23,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--data-root", default=None)
     p.add_argument("--skip-meld", action="store_true")
+    p.add_argument("--esd", action="store_true", help="also ESD (English); only after its licence form was emailed")
     p.add_argument("--extended-models", action="store_true")
     p.add_argument("--large-model", action="store_true")
     p.add_argument("--workers", type=int, default=16)
@@ -37,6 +39,8 @@ def main() -> None:
              ["download_tess.py", f"--workers={min(args.workers, 4)}"]]
     if not args.skip_meld:
         steps.append(["download_meld.py"])
+    if args.esd:
+        steps.append(["download_esd.py", "--licence-sent"])
     failed = []
     for step in steps:
         cmd = [sys.executable, str(HERE / step[0]), *step[1:], *[c for c in common if not (step[0] == "download_pretrained.py" and c == "--force")]]

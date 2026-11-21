@@ -65,6 +65,21 @@ meld:
   cite: Poria et al. (2019), ACL
   status: script ready
 
+esd:
+  access: public link, but use only after a signed, dated licence PDF is returned to haizhou.li@nus.edu.sg (clause 5); internal non-commercial research; derived models must be shared with the licensor (clause 6)
+  source: https://github.com/HLTSingapore/Emotional-Speech-Data (Google Drive file 1scuFwqh8s7KIYAfZW1Eu6088ZAK2SI-v)
+  size: whole archive (English + Mandarin) not stated; English half ~17,500 clips
+  clips: 17500 English (10 speakers x 350 parallel sentences x 5 emotions); the 10 Mandarin speakers are dropped
+  speakers: 10 native English speakers (0011-0020)
+  speech: acted, parallel sentences (same text in every emotion, so text carries no emotion)
+  emotions: neutral, happy, angry, sad, surprise
+  transcripts: yes (lexically neutral)
+  dimensions: no
+  split: speakers 0011-0018 train, 0019 val, 0020 test (the corpus's own split is by sentence, not speaker)
+  license: NUS HLT End User License Agreement (signed; non-commercial; copyleft clause 6; acknowledgement clause 10)
+  cite: Zhou, Sisman, Liu & Li (2021), ICASSP; Zhou et al. (2022), Speech Communication 137
+  status: script ready (opt-in --esd), layout not yet seen on real files
+
 iemocap:
   access: licensed (free for academic research; release form at https://sail.usc.edu/iemocap/)
   size: ~12 GB

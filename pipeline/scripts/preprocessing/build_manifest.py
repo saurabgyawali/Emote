@@ -19,6 +19,10 @@ and the splits depend on them:
             (a typo for OAF, not a third speaker); "ps" = pleasant surprise.
   MELD      raw/meld/**/{train,dev,test}_sent_emo.csv + dia<D>_utt<U>.mp4; transcripts are
             cp1252-mangled UTF-8 in places ("Iâ\\x80\\x99m") and are repaired.
+  ESD       raw/esd/**/00SS/<Emotion>/[train|evaluation|test/]00SS_NNNNNN.wav, 16 kHz, English
+            speakers 0011-0020 only; transcripts in 00SS.txt as "00SS_NNNNNN<TAB>text<TAB>emotion".
+            Layout taken from the ESD README/paper, not yet seen on real files: the parser accepts
+            the emotion folder at any depth and fails loudly if nothing matches.
   IEMOCAP   raw/iemocap/IEMOCAP_full_release/Session{1-5}/dialog/EmoEvaluation/*.txt lines
             "[start - end]  TURN  emo  [V, A, D]" with V/A/D on 1-5; wavs under sentences/wav.
   MSP-Pod   raw/msp_podcast/Labels/labels_consensus.csv (EmoClass, EmoAct/Val/Dom on 1-7,
@@ -27,7 +31,9 @@ and the splits depend on them:
 Splits are speaker-independent wherever the corpus allows: RAVDESS actors 19-20 val and
 21-24 test; CREMA-D actors split 70/15/15 within each sex by a fixed seed; IEMOCAP
 sessions 1-3 / 4 / 5; MELD and MSP-Podcast use their official splits (MELD's recur
-speakers -- it is a TV show). TESS has only two speakers and is training data only.
+speakers -- it is a TV show). TESS has only two speakers and is training data only. ESD's
+own train/evaluation/test folders split sentences, not speakers, so they are ignored:
+speakers 0011-0018 train, 0019 val, 0020 test.
 """
 
 from __future__ import annotations
@@ -55,7 +61,7 @@ from _fetch import data_root  # noqa: E402
 from emotion_model.labels import DIMENSIONS, MANIFEST_SCHEMA, validate_manifest  # noqa: E402
 
 SPLIT_SEED = 20261010
-ALL = ("ravdess", "crema_d", "tess", "meld", "iemocap", "msp_podcast")
+ALL = ("ravdess", "crema_d", "tess", "meld", "esd", "iemocap", "msp_podcast")
 
 RAVDESS_EMO = {"01": "neutral", "02": "neutral", "03": "happy", "04": "sad", "05": "angry", "06": "fear",
                "07": "disgust", "08": "surprise"}
@@ -76,6 +82,9 @@ TESS_EMO = {"angry": "angry", "disgust": "disgust", "fear": "fear", "happy": "ha
 MELD_EMO = {"neutral": "neutral", "joy": "happy", "sadness": "sad", "anger": "angry", "fear": "fear",
             "disgust": "disgust", "surprise": "surprise"}
 MELD_SPLIT = {"train": "train", "dev": "val", "test": "test"}
+ESD_EMO = {"neutral": "neutral", "happy": "happy", "sad": "sad", "angry": "angry", "surprise": "surprise"}
+ESD_ENGLISH = tuple(f"{i:04d}" for i in range(11, 21))
+ESD_SPLIT = {"0019": "val", "0020": "test"}
 IEMOCAP_EMO = {"neu": "neutral", "hap": "happy", "exc": "happy", "sad": "sad", "ang": "angry"}
 MSP_EMO = {"N": "neutral", "H": "happy", "S": "sad", "A": "angry", "F": "fear", "D": "disgust", "U": "surprise"}
 MSP_SPLIT = {"Train": "train", "Development": "val", "Test1": "test"}
@@ -198,6 +207,43 @@ def parse_meld(raw: Path, _args) -> list[dict]:  # noqa: ANN001
     return rows
 
 
+def _read_text_any(path: Path) -> str:
+    raw = path.read_bytes()
+    for enc in ("utf-8-sig", "utf-16", "gb18030"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1")
+
+
+def parse_esd(raw: Path, _args) -> list[dict]:  # noqa: ANN001
+    texts = {}
+    for t in raw.rglob("00??.txt"):
+        if t.stem not in ESD_ENGLISH:
+            continue
+        for line in _read_text_any(t).splitlines():
+            parts = [x.strip() for x in line.split("\t") if x.strip()]
+            if len(parts) >= 2:
+                texts[parts[0]] = parts[1]
+    rows, seen = [], set()
+    for w in sorted(raw.rglob("*.wav")):
+        if "__MACOSX" in w.parts or w.name.startswith("._"):
+            continue
+        speaker = w.stem.split("_")[0]
+        emotion = next((ESD_EMO[p.lower()] for p in reversed(w.relative_to(raw).parts[:-1]) if p.lower() in ESD_EMO), None)
+        if speaker not in ESD_ENGLISH or emotion is None or w.stem in seen:
+            continue
+        seen.add(w.stem)
+        rows.append(row("esd", w.stem, w, speaker, "U", ESD_SPLIT.get(speaker, "train"), emotion,
+                        texts.get(w.stem, ""), emotion))
+    if not rows:
+        raise SystemExit(f"ESD: no English clips with an emotion folder found under {raw}")
+    if not texts:
+        print("  esd: no transcript files matched; text left empty")
+    return rows
+
+
 def parse_iemocap(raw: Path, args) -> list[dict]:  # noqa: ANN001
     base = next((p for p in raw.rglob("Session1") if p.is_dir()), None)
     if base is None:
@@ -260,7 +306,7 @@ def parse_msp_podcast(raw: Path, args) -> list[dict]:  # noqa: ANN001
 
 
 PARSERS = {"ravdess": parse_ravdess, "crema_d": parse_crema_d, "tess": parse_tess, "meld": parse_meld,
-           "iemocap": parse_iemocap, "msp_podcast": parse_msp_podcast}
+           "esd": parse_esd, "iemocap": parse_iemocap, "msp_podcast": parse_msp_podcast}
 
 
 # --- audio cache -----------------------------------------------------------------

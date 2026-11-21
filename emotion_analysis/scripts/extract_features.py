@@ -31,7 +31,6 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 EXP_DIR = Path(__file__).resolve().parent
 ANALYSIS_DIR = EXP_DIR.parent
@@ -159,6 +158,10 @@ def load_records(sessions_dir: Path) -> list[tuple[str, Path, dict]]:
 
 
 def build_table(sessions_dir: Path, existing: pd.DataFrame | None, include_dropped: bool) -> pd.DataFrame:
+    # Imported here, not at the top: the Jetson imports acoustic_features() for the emotion model
+    # from the transcriber venv, which has no pandas (found 2026-11-08).
+    import pandas as pd
+
     import soundfile as sf
 
     done = set(zip(existing["session"], existing["index"])) if existing is not None and len(existing) else set()
@@ -213,6 +216,8 @@ def build_table(sessions_dir: Path, existing: pd.DataFrame | None, include_dropp
 
 
 def main(argv: list[str] | None = None) -> int:
+    import pandas as pd
+
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--sessions-dir", default=str(DEFAULT_SESSIONS))
     p.add_argument("--out", default=str(DEFAULT_OUT))

@@ -16,6 +16,7 @@
 #   --skip-meld         skip the 10.9 GB MELD download (the only open corpus with real transcripts)
 #   --extended-models   also HuBERT and wav2vec 2.0 (experiments E6, E7)
 #   --large-model       also WavLM-Large (experiment E8; needs a >= 24 GB GPU)
+#   --esd               also ESD, 10 English speakers (only after its licence form was emailed)
 #   --crema-label L     acted (default) | voice_vote (what listeners heard)
 #   --no-smoke          skip the final smoke test
 #   --dry-run
@@ -26,19 +27,20 @@ EMOTE="$(dirname "$HERE")"
 DATA="${EMOTE_DATA:-$HOME/emote_data}"
 VENV="$HOME/emote-train-venv"
 CUDA_TAG="cu124"
-SKIP_MELD=0; EXT=0; LARGE=0; CREMA="acted"; SMOKE=1; DRY=0
+SKIP_MELD=0; ESD=0; EXT=0; LARGE=0; CREMA="acted"; SMOKE=1; DRY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --data-root) DATA="$2"; shift 2 ;;
     --venv) VENV="$2"; shift 2 ;;
     --cuda) CUDA_TAG="$2"; shift 2 ;;
     --skip-meld) SKIP_MELD=1; shift ;;
+    --esd) ESD=1; shift ;;
     --extended-models) EXT=1; shift ;;
     --large-model) LARGE=1; shift ;;
     --crema-label) CREMA="$2"; shift 2 ;;
     --no-smoke) SMOKE=0; shift ;;
     --dry-run) DRY=1; shift ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -109,6 +111,7 @@ DLPY="$PY"; [ "$DRY" = 1 ] && [ ! -x "$PY" ] && DLPY="$PY3"
 say "5) Downloads (resumable; re-run this script if a network error stops it)"
 DL=(--data-root "$DATA")
 [ "$SKIP_MELD" = 1 ] && DL+=(--skip-meld)
+[ "$ESD" = 1 ] && DL+=(--esd)
 [ "$EXT" = 1 ] && DL+=(--extended-models)
 [ "$LARGE" = 1 ] && DL+=(--large-model)
 [ "$DRY" = 1 ] && DL+=(--dry-run)

@@ -52,7 +52,7 @@ case "$STEP" in
   status)
     echo "data root : $EMOTE_DATA"
     echo "python    : $PY"
-    for d in ravdess crema_d tess meld iemocap msp_podcast; do
+    for d in ravdess crema_d tess meld esd iemocap msp_podcast; do
       if [ -f "$EMOTE_DATA/raw/$d/DOWNLOAD_OK.json" ]; then s="downloaded"; elif [ -d "$EMOTE_DATA/raw/$d" ]; then s="present (licensed or partial)"; else s="-"; fi
       printf '  %-12s %s\n' "$d" "$s"
     done

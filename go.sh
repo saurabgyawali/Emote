@@ -137,7 +137,12 @@ step_emotions() {
   local venv="$TRANSCRIBER/.venv"
   [ -f "$TRANSCRIBER/.venv_path" ] && venv="$(cat "$TRANSCRIBER/.venv_path")"
   [ -n "${VENV_DIR:-}" ] && venv="$VENV_DIR"
-  "$venv/bin/python" "$HERE/pipeline/scripts/export/annotate_sessions.py" ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}
+  "$venv/bin/python" "$HERE/pipeline/scripts/export/annotate_sessions.py" "$@"
+}
+
+# True when an exported model is in emotion_deploy/, or one folder too deep inside it.
+has_emotion_model() {
+  [ -f "$HERE/emotion_deploy/deploy.json" ] || compgen -G "$HERE/emotion_deploy/*/deploy.json" >/dev/null
 }
 
 step_features() {
@@ -184,7 +189,7 @@ case "$STEP" in
   record)   step_record ;;
   logs)     step_logs ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} ;;
   vocab)    step_vocab ;;
-  emotions) step_emotions ;;
+  emotions) step_emotions ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} ;;
   features) step_features ;;
   copy)     step_copy ;;
   install)  step_install ;;
@@ -208,8 +213,14 @@ case "$STEP" in
     step_record || warn "The session ended with an error; bundling the logs anyway."
     # Emotion labels only after the whole talk is over: Whisper has exited, so the model
     # gets the memory and CPU to itself instead of competing with live transcription.
-    if [ -f "$HERE/emotion_deploy/deploy.json" ]; then
-      step_emotions || warn "Emotion labelling failed (see above); the transcript is unaffected."
+    if has_emotion_model; then
+      step_emotions --latest || warn "Emotion labelling failed (see above); the transcript is unaffected."
+    else
+      # Skipping silently hid a missing model on 2026-11-08: the session ran and nobody knew why
+      # no emotions appeared.
+      warn "No emotion model on this machine, so the session was not labelled."
+      info "Copy the CONTENTS of the exported folder (deploy.json, model.int8.onnx, tokenizer.json ...)"
+      info "into $HERE/emotion_deploy/ ; then label this session with: bash go.sh emotions --latest"
     fi
     step_logs
     say "Done"

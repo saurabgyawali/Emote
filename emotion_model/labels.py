@@ -9,6 +9,7 @@ in pipeline/datasets.yaml:
   RAVDESS  calm -> neutral (the usual merge; calm is a low-arousal neutral)
   TESS     ps (pleasant surprise) -> surprise
   MELD     joy -> happy, sadness -> sad, anger -> angry
+  ESD      English speakers only; its five classes as they are (no fear, no disgust)
   IEMOCAP  excited -> happy, then the standard four classes only
   MSP-Pod  contempt, other and no-agreement are dropped from the categorical task
 """
@@ -25,6 +26,7 @@ DATASET_CLASSES: dict[str, tuple[str, ...]] = {
     "crema_d": ("neutral", "happy", "sad", "angry", "fear", "disgust"),
     "tess": EMOTIONS,
     "meld": EMOTIONS,
+    "esd": ("neutral", "happy", "sad", "angry", "surprise"),
     "iemocap": BIG4,
     "msp_podcast": EMOTIONS,
 }

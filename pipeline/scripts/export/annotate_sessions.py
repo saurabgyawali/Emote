@@ -2,6 +2,7 @@
 
     python annotate_sessions.py                         # all sessions, model in Emote/emotion_deploy/
     python annotate_sessions.py --session 20261010_190932 --force
+    python annotate_sessions.py --latest                # only the newest session, as go.sh does after recording
     bash go.sh emotions                                 # the same, through the one user-facing script
 
 Reads transcriber/sessions/<s>/utterances.jsonl (text) and clips/utt_NNNN.wav (16 kHz
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections import Counter
@@ -31,6 +33,52 @@ sys.path.insert(0, str(EMOTE))
 
 DEFAULT_DEPLOY = EMOTE / "emotion_deploy"
 DEFAULT_SESSIONS = EMOTE / "transcriber" / "sessions"
+CUE_NAMES = {"audio": "voice", "text": "words", "prosody": "pitch/energy"}
+UNSURE_BELOW = 0.40
+# Test UA of the deployed E5 per corpus (ACCRE run 2026-11-04): what "how often right" means here.
+ACCURACY_NOTE = ("A model's guess, not a diagnosis: trained on actors and TV dialogue, it was right about 72-77% of "
+                 "the time on acted speech and 44% on natural conversation.")
+
+
+def find_deploy(path: Path) -> Path | None:
+    """The folder holding deploy.json: the given one, or its single subfolder (a copy one level too deep)."""
+    if (path / "deploy.json").exists():
+        return path
+    nested = sorted(p.parent for p in path.glob("*/deploy.json"))
+    return nested[0] if len(nested) == 1 else None
+
+
+def clock(seconds: float) -> str:
+    h, rem = divmod(seconds, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{int(h):02d}:{int(m):02d}:{sec:06.3f}"
+
+
+def report(session: Path, summary: dict, color: bool) -> None:
+    """The end-of-session screen: one line per utterance, then the session's overall picture."""
+    bold = (lambda t: f"\033[1m{t}\033[0m") if color else (lambda t: t)
+    dim = (lambda t: f"\033[2m{t}\033[0m") if color else (lambda t: t)
+    records = [json.loads(line) for line in (session / "emotions.jsonl").read_text(encoding="utf-8").splitlines()]
+    print(f"\n{bold('How you sounded')}  session {session.name} - {len(records)} utterance(s), "
+          f"labelled in {summary['seconds']}s with {summary['model']} ({summary['model_file']})\n")
+    if not records:
+        print("  Nothing to label: no kept utterances in this session.")
+        return
+    for r in records:
+        ranked = sorted(r["probs"].items(), key=lambda kv: -kv[1])
+        cues = ", ".join(f"{CUE_NAMES.get(m, m)} {w:.0%}" for m, w in
+                         sorted(r["modality_weights"].items(), key=lambda kv: -kv[1]))
+        unsure = dim(" (unsure)") if r["confidence"] < UNSURE_BELOW else ""
+        text = r["text"] if len(r["text"]) <= 70 else r["text"][:67] + "..."
+        print(f"  {clock(r['start_s'])}  {bold(r['emotion'].ljust(8))} {r['confidence']:4.0%}{unsure}  {text}")
+        print(dim(f"                {'then ' + ranked[1][0] + f' {ranked[1][1]:.0%}' if len(ranked) > 1 else ''}"
+                  f"  - judged from {cues}"))
+    counts = summary["emotions"]
+    top, n = next(iter(counts.items()))
+    print(f"\n  {bold('Overall')}: mostly {bold(top)} ({n} of {len(records)} utterances)"
+          + (f"; also {', '.join(f'{e} {c}' for e, c in list(counts.items())[1:])}" if len(counts) > 1 else ""))
+    print(dim(f"  {ACCURACY_NOTE}"))
+    print(dim(f"  Saved: {session / 'emotions.jsonl'}"))
 
 
 class Model:
@@ -116,12 +164,15 @@ def main() -> None:
     p.add_argument("--deploy", default=str(DEFAULT_DEPLOY))
     p.add_argument("--sessions-dir", default=str(DEFAULT_SESSIONS))
     p.add_argument("--session", default=None, help="one session folder name; default all")
+    p.add_argument("--latest", action="store_true", help="only the newest session, with the full results screen")
     p.add_argument("--force", action="store_true")
     args = p.parse_args()
-    deploy = Path(args.deploy)
-    if not (deploy / "deploy.json").exists():
-        raise SystemExit(f"no exported model at {deploy}. Train on the GPU machine, run `bash pipeline/run.sh export`, "
-                         f"and copy <data root>/deploy/<name>/ here as {DEFAULT_DEPLOY.name}/")
+    deploy = find_deploy(Path(args.deploy))
+    if deploy is None:
+        raise SystemExit(f"no exported model at {args.deploy}: copy the CONTENTS of the exported folder "
+                         f"(deploy.json, model.int8.onnx, tokenizer.json, ...) into {DEFAULT_DEPLOY}/")
+    if deploy != Path(args.deploy):
+        print(f"  note: using the model one folder down, in {deploy}")
     if "prosody" in json.loads((deploy / "deploy.json").read_text())["modalities"]:
         try:
             import librosa  # noqa: F401
@@ -129,7 +180,19 @@ def main() -> None:
             raise SystemExit("This model uses the prosody tower, which needs librosa (pitch tracking). Install it once into "
                              f"this environment:\n  {sys.executable} -m pip install librosa")
     model = Model(deploy)
-    sessions = sorted(Path(args.sessions_dir).glob(args.session or "*"))
+    sessions = sorted(p for p in Path(args.sessions_dir).glob(args.session or "*") if p.is_dir())
+    if args.latest:
+        sessions = sessions[-1:]
+        if not sessions:
+            raise SystemExit(f"no sessions in {args.sessions_dir}")
+        summ = annotate(sessions[0], model, args.force)
+        if summ is None:
+            summ = json.loads((sessions[0] / "emotions_summary.json").read_text()) \
+                if (sessions[0] / "emotions_summary.json").exists() else None
+        if summ is None:
+            raise SystemExit(f"{sessions[0].name}: no utterances.jsonl, nothing to label")
+        report(sessions[0], summ, sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
+        return
     print(f"model {model.info['experiment']} ({model.path.name}); {len(sessions)} session(s)")
     for s in sessions:
         summ = annotate(s, model, args.force)

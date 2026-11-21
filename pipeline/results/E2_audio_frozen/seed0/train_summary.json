@@ -1,0 +1,66 @@
+{
+  "experiment": "E2_audio_frozen",
+  "seed": 0,
+  "fingerprint": "112468575d15",
+  "train_datasets": [
+    "crema_d",
+    "meld",
+    "ravdess",
+    "tess"
+  ],
+  "heldout_datasets": [],
+  "clips": {
+    "train": {
+      "crema_d": 5229,
+      "meld": 9824,
+      "ravdess": 1080,
+      "tess": 2800
+    },
+    "val": {
+      "crema_d": 1065,
+      "meld": 1088,
+      "ravdess": 120
+    },
+    "test": {
+      "crema_d": 1148,
+      "meld": 2557,
+      "ravdess": 240
+    },
+    "heldout": {}
+  },
+  "parameters": {
+    "total": 94943625,
+    "trainable": 561689
+  },
+  "modalities": [
+    "audio"
+  ],
+  "best_epoch": 5,
+  "epochs_run": 10,
+  "stopped_early": true,
+  "optimizer_steps": 5910,
+  "wall_s": 477.30204367637634,
+  "device": "NVIDIA A100-SXM4-80GB",
+  "precision": "bf16",
+  "peak_gpu_mem_gb": 3.973546496,
+  "layer_weights_best": [
+    0.08852218836545944,
+    0.05946033075451851,
+    0.07047874480485916,
+    0.08321447670459747,
+    0.12851254642009735,
+    0.12495508790016174,
+    0.12394008040428162,
+    0.0961880162358284,
+    0.05697840452194214,
+    0.050809428095817566,
+    0.043405354022979736,
+    0.040236376225948334,
+    0.033298976719379425
+  ],
+  "versions": {
+    "torch": "2.6.0+cu124",
+    "transformers": "4.57.6"
+  },
+  "checkpoint": "runs/E2_audio_frozen/seed0/best.pt"
+}

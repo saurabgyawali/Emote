@@ -1,0 +1,52 @@
+{
+  "experiment": "E1_prosody_only",
+  "seed": 0,
+  "fingerprint": "c0048161acde",
+  "train_datasets": [
+    "crema_d",
+    "meld",
+    "ravdess",
+    "tess"
+  ],
+  "heldout_datasets": [],
+  "clips": {
+    "train": {
+      "crema_d": 5229,
+      "meld": 9824,
+      "ravdess": 1080,
+      "tess": 2800
+    },
+    "val": {
+      "crema_d": 1065,
+      "meld": 1088,
+      "ravdess": 120
+    },
+    "test": {
+      "crema_d": 1148,
+      "meld": 2557,
+      "ravdess": 240
+    },
+    "heldout": {}
+  },
+  "parameters": {
+    "total": 108427,
+    "trainable": 108427
+  },
+  "modalities": [
+    "prosody"
+  ],
+  "best_epoch": 4,
+  "epochs_run": 12,
+  "stopped_early": true,
+  "optimizer_steps": 7092,
+  "wall_s": 91.69766211509705,
+  "device": "NVIDIA A100-SXM4-80GB",
+  "precision": "bf16",
+  "peak_gpu_mem_gb": 0.020905472,
+  "layer_weights_best": null,
+  "versions": {
+    "torch": "2.6.0+cu124",
+    "transformers": "4.57.6"
+  },
+  "checkpoint": "runs/E1_prosody_only/seed0/best.pt"
+}

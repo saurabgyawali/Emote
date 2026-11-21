@@ -1,0 +1,60 @@
+{
+  "hard_failures": [],
+  "warnings": [
+    "meld/test: class imbalance 25:1 (neutral vs fear)",
+    "meld/train: class imbalance 17:1 (neutral vs fear)",
+    "meld/val: class imbalance 21:1 (neutral vs disgust)",
+    "tess: no val/test split (training data only)",
+    "11 clip(s) longer than 20 s are centre-cropped at evaluation"
+  ],
+  "clips": 25151,
+  "hours": 20.43,
+  "datasets": {
+    "crema_d": {
+      "clips": 7442,
+      "speakers": 91,
+      "splits": {
+        "train": 5229,
+        "test": 1148,
+        "val": 1065
+      },
+      "with_text": 7442,
+      "with_dimensions": 0,
+      "median_s": 2.5
+    },
+    "meld": {
+      "clips": 13469,
+      "speakers": 302,
+      "splits": {
+        "train": 9824,
+        "test": 2557,
+        "val": 1088
+      },
+      "with_text": 13469,
+      "with_dimensions": 0,
+      "median_s": 2.5
+    },
+    "ravdess": {
+      "clips": 1440,
+      "speakers": 24,
+      "splits": {
+        "train": 1080,
+        "test": 240,
+        "val": 120
+      },
+      "with_text": 1440,
+      "with_dimensions": 0,
+      "median_s": 3.67
+    },
+    "tess": {
+      "clips": 2800,
+      "speakers": 2,
+      "splits": {
+        "train": 2800
+      },
+      "with_text": 2800,
+      "with_dimensions": 0,
+      "median_s": 2.05
+    }
+  }
+}

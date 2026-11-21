@@ -108,8 +108,15 @@ def main() -> None:
     name = f"{cfg['experiment']}_seed{cfg['seed']}"
     out = Path(args.out) if args.out else root / "deploy" / name
     if (out / "deploy.json").exists() and not args.force:
-        print(f"already exported: {out} (use --force)")
-        return
+        # The folder is named by experiment + seed only, so a retrained checkpoint lands on the
+        # same name: on ACCRE (2026-11-04) the full 20-epoch E5 was skipped because a 2-epoch
+        # test export of the same run was already there.
+        old = json.loads((out / "deploy.json").read_text())
+        if (old.get("epoch"), old.get("val_score")) == (ckpt.get("epoch"), ckpt.get("val_score")):
+            print(f"already exported: {out} (use --force)")
+            return
+        print(f"  {out.name}: deploy.json is from epoch {old.get('epoch')} (val {old.get('val_score')}), the checkpoint "
+              f"is epoch {ckpt.get('epoch')} (val {ckpt.get('val_score')}): re-exporting")
     if args.dry_run:
         print(f"would export {ckpt_path} -> {out}")
         return
@@ -163,9 +170,14 @@ def main() -> None:
     # convolutional front end would produce.
     quantize_dynamic(str(fp32), str(int8), weight_type=QuantType.QInt8, op_types_to_quantize=["MatMul", "Gemm"],
                      per_channel=True)
-    sess32 = ort.InferenceSession(str(fp32), providers=["CPUExecutionProvider"])
+    # An explicit thread count stops ONNX Runtime pinning threads to every core of the node:
+    # under SLURM most of them are outside the job's cgroup, and each pin failed with a logged
+    # error (ACCRE smoke test, 2026-11-04). It also makes the measured latency match the job's CPUs.
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = len(os.sched_getaffinity(0))
+    sess32 = ort.InferenceSession(str(fp32), opts, providers=["CPUExecutionProvider"])
     try:
-        sess8 = ort.InferenceSession(str(int8), providers=["CPUExecutionProvider"])
+        sess8 = ort.InferenceSession(str(int8), opts, providers=["CPUExecutionProvider"])
         int8_error = None
     except Exception as exc:  # noqa: BLE001 - a model that cannot be quantised still ships in fp32
         sess8, int8_error = None, f"{type(exc).__name__}: {exc}"
@@ -214,7 +226,7 @@ def main() -> None:
             tokenizer.save_pretrained(str(out))
             tok_kind = "tokenizers_json"
     info = {
-        "experiment": cfg["experiment"], "seed": cfg["seed"], "checkpoint": str(ckpt_path), "epoch": ckpt.get("epoch"),
+        "experiment": cfg["experiment"], "seed": cfg["seed"], "checkpoint": f"{cfg['experiment']}/seed{cfg['seed']}/best.pt", "epoch": ckpt.get("epoch"),
         "val_score": ckpt.get("val_score"), "modalities": mods, "inputs": names, "emotions": list(EMOTIONS),
         "inference_classes": cfg["inference"]["classes"], "dimensions": list(DIMENSIONS),
         "sample_rate": SAMPLE_RATE, "target_dbfs": TARGET_DBFS, "max_seconds": cfg["data"]["max_eval_seconds"],

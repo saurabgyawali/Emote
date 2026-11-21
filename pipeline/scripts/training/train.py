@@ -277,7 +277,7 @@ def main() -> None:
         "peak_gpu_mem_gb": torch.cuda.max_memory_allocated(device) / 1e9 if device.type == "cuda" else 0.0,
         "layer_weights_best": model.towers["audio"].layer_weights().tolist() if "audio" in model.towers else None,
         "versions": {"torch": torch.__version__, "transformers": transformers.__version__},
-        "checkpoint": str(run_dir / "best.pt"),
+        "checkpoint": str((run_dir / "best.pt").relative_to(root)),
     }
     summary_path.write_text(json.dumps(summary, indent=2, default=float))
     print(f"  done in {summary['wall_s'] / 60:.1f} min; results -> {res_dir}")

@@ -87,6 +87,7 @@ logs.
 | Microphone | Any USB microphone (chosen by name in `config.toml`) | USB PnP Sound Device |
 | System packages | `libportaudio2`, `portaudio19-dev`, `libsndfile1`, `ffmpeg`, `build-essential` (installed by `install.sh`) | |
 | Network | Only for installation (PyPI, Hugging Face, GitHub) | |
+| Git LFS | Needed to download the trained emotion models (`sudo apt-get install git-lfs`) | git-lfs 3.0.2 |
 
 It also runs on any x86 Linux machine with Python 3.10+, on the CPU or an NVIDIA GPU; without
 PortAudio only file input (`run.sh --wav`) works.
@@ -327,6 +328,24 @@ Emote/
 ### Prerequisites
 
 See [System Requirements](#-system-requirements).
+
+### Get the code and the models
+
+The trained emotion models (`emotion_deploy/*.onnx`, about 1 GB) are stored with
+[Git LFS](https://git-lfs.com). Install it **before** cloning, or the `.onnx` files arrive as
+small text placeholders instead of models:
+
+```bash
+sudo apt-get install -y git-lfs          # Ubuntu / Jetson; macOS: brew install git-lfs
+git lfs install                          # once per machine
+git clone https://github.com/saurabgyawali/Emote.git
+cd Emote
+git lfs pull                             # fetch the model files (no-op if the clone already did)
+ls -lh emotion_deploy/*.onnx             # expect ~708 MB and ~323 MB, not ~130 bytes
+```
+
+Already cloned without LFS? Run `git lfs install && git lfs pull` inside `Emote/`.
+To clone the code only and skip the 1 GB download: `GIT_LFS_SKIP_SMUDGE=1 git clone ...`.
 
 ### First run on a new machine
 

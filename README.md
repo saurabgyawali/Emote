@@ -18,7 +18,7 @@ speech emotion recognition, with no audio ever leaving the device.
 
 **Pipeline:** microphone → voice activity detection → local Whisper → per-utterance features → model
 
-**Emotion model (stage 3):** the training pipeline is in [`pipeline/`](pipeline/README.md) — start with **[NEXT_STEPS.md](NEXT_STEPS.md)** on a GPU machine.
+**Emotion model (stage 3):** the training pipeline is in [`pipeline/`](pipeline/README.md) — trained models ship in [`emotion_deploy/`](#-trained-emotion-model).
 
 [Features](#-features) • [How It Works](#-how-it-works) • [Getting Started](#-getting-started) • [Roadmap](#-roadmap) • [Contributing](#-contributing)
 
@@ -28,7 +28,10 @@ speech emotion recognition, with no audio ever leaving the device.
 
 ## 🧭 Table of Contents
 
+- [About](#-about)
+- [System Requirements](#-system-requirements)
 - [Features](#-features)
+- [Trained Emotion Model](#-trained-emotion-model)
 - [Why Emote?](#-why-emote)
 - [How It Works](#-how-it-works)
 - [What a Session Produces](#-what-a-session-produces)
@@ -45,6 +48,67 @@ speech emotion recognition, with no audio ever leaving the device.
 - [Known Issues](#-known-issues)
 - [Acknowledgments](#-acknowledgments)
 - [License](#-license)
+
+---
+
+## 📖 About
+
+Emote estimates a speaker's emotional state from their voice — both **what** they say (the
+transcript) and **how** they say it (pitch, loudness, pace, pauses, timbre) — on a small edge
+device, with no cloud service and no audio leaving the machine.
+
+It is built in three stages:
+
+| Stage | Folder | Runs on | What it does |
+|---|---|---|---|
+| 1. Live transcriber | `transcriber/` | Jetson Orin Nano | Captures one speaker from a USB microphone, splits speech into utterances with voice activity detection, transcribes them locally with Whisper on the GPU, and saves text, timings and audio clips per session. |
+| 2. Feature extraction | `emotion_analysis/` | Any PC | Turns every utterance into 62 acoustic and timing features (pitch, energy, spectral shape, MFCCs, speaking rate, pauses). |
+| 3. Emotion model | `pipeline/`, `emotion_model/` | GPU machine to train, Jetson CPU to run | A multimodal model (WavLM audio + DistilRoBERTa transcript + prosody features) trained on public emotion corpora (RAVDESS, CREMA-D, TESS, MELD), exported to ONNX and int8, and used to label recorded sessions with 7 emotion probabilities. |
+
+Everything a user needs goes through one script: `bash go.sh` installs, checks the
+microphone, records, transcribes, labels emotions (when a model is present) and bundles the
+logs.
+
+---
+
+## 💻 System Requirements
+
+### Live transcriber (stage 1)
+
+| | Minimum | Tested with |
+|---|---|---|
+| Board | NVIDIA Jetson Orin Nano (8 GB) | Orin Nano Developer Kit Super |
+| OS | JetPack 6 / L4T R36.x, Ubuntu 22.04 | L4T R36.4.7, Ubuntu 22.04.5 |
+| CUDA | 12.x with cuDNN | CUDA 12.6 |
+| Python | 3.10 | 3.10.12 |
+| Build tools | gcc 11, cmake ≥ 3.18, git (for the CUDA CTranslate2 build) | gcc 11.4, cmake 3.22.1 |
+| RAM | ~1.5 GB free for `small.en`; ≥ 3 GB free recommended (GPU and CPU share memory — close browsers and IDEs while recording) | 7.6 GB total |
+| Disk | ~2 GB (venv + Whisper model); ~13 GB more while building CTranslate2 from source | 191 GB free |
+| Microphone | Any USB microphone (chosen by name in `config.toml`) | USB PnP Sound Device |
+| System packages | `libportaudio2`, `portaudio19-dev`, `libsndfile1`, `ffmpeg`, `build-essential` (installed by `install.sh`) | |
+| Network | Only for installation (PyPI, Hugging Face, GitHub) | |
+
+It also runs on any x86 Linux machine with Python 3.10+, on the CPU or an NVIDIA GPU; without
+PortAudio only file input (`run.sh --wav`) works.
+
+### Feature extraction (stage 2)
+
+Any Linux, macOS or Windows machine with Python 3.10+ and ~1 GB RAM. No GPU.
+
+### Emotion-model training (stage 3)
+
+| | Minimum | Tested with |
+|---|---|---|
+| GPU | NVIDIA, ≥ 8 GB VRAM (the shipped runs peaked at 4-6.3 GB; batch 8 × accumulation 4 fits in ~3.5 GB) | A100 80 GB |
+| Software | Python 3.10+, PyTorch ≥ 2.6, transformers ≥ 4.44 (installed by `pipeline/setup_training_machine.sh`) | torch 2.6, transformers 4.57 |
+| Disk | ~15 GB to download the four public corpora (MELD alone is 10.9 GB of video) plus ~2 GB of pretrained encoders and ~0.7 GB per saved checkpoint | |
+| Cluster | Optional: Slurm scripts in `pipeline/slurm/` | ACCRE |
+
+### Running the trained model on the Jetson
+
+CPU only, through `onnxruntime` in the transcriber venv (`pip install onnxruntime` if it is
+missing). No GPU memory is used, so it does not compete with Whisper. Git LFS is needed to
+download the model files (see [Trained Emotion Model](#-trained-emotion-model)).
 
 ---
 
@@ -81,6 +145,43 @@ speech emotion recognition, with no audio ever leaving the device.
 - ♻️ **Idempotent**: re-running appends only new utterances; `--force` recomputes everything.
 - 🧪 **Unsupervised baseline**: k-means over the standardised feature table with a silhouette score and a PCA scatter — a sanity check that vocal styles separate *at all* before any label is collected.
 - 📁 **CSV + Parquet** output, so the table drops straight into pandas, scikit-learn, or a notebook.
+
+---
+
+## 🧠 Trained Emotion Model
+
+`emotion_deploy/` holds the exported model (experiment `E5_audio_text_prosody`, seed 0) and its
+tokenizer:
+
+| File | Size | Use |
+|---|---|---|
+| `model.onnx` | 708 MB | fp32, reference accuracy |
+| `model.int8.onnx` | 323 MB | int8-quantised, smaller and faster on the Jetson CPU |
+| `deploy.json`, `tokenizer.json`, `vocab.json`, `merges.txt`, ... | < 5 MB | Inputs, labels, normalisation and tokenizer for inference |
+
+The `.onnx` files are stored with **Git LFS**. After cloning:
+
+```bash
+sudo apt-get install git-lfs    # once per machine
+git lfs install
+git lfs pull                    # downloads the model files
+bash go.sh emotions --latest    # label the newest session
+```
+
+Results on the held-out test splits (unweighted accuracy over 7 classes, mean ± SD over 3 seeds;
+chance ≈ 0.15). Full tables and figures: [`pipeline/results/RESULTS.md`](pipeline/results/RESULTS.md),
+[`pipeline/figures/`](pipeline/figures/).
+
+| Experiment | Inputs | Test UA |
+|---|---|---|
+| E1 | prosody features only | 0.382 ± 0.007 |
+| E2 | WavLM audio, frozen | 0.574 ± 0.014 |
+| E3 | WavLM audio, fine-tuned | 0.584 ± 0.013 |
+| E4 | audio + transcript | 0.624 ± 0.008 |
+| **E5** | **audio + transcript + prosody (shipped)** | **0.642 ± 0.011** |
+
+These corpora are mostly acted speech; accuracy on a real person's spontaneous speech at the
+Jetson will be lower (the `X1` acted-to-natural experiment drops to 0.19 on held-out natural speech).
 
 ---
 
@@ -204,10 +305,18 @@ Emote/
 │   ├── wheels/                     # Cached built wheels — turns a 45 min build into seconds
 │   └── README.md
 │
+├── pipeline/                       # Stage 3 — emotion-model training (GPU machine / Slurm)
+│   ├── configs/                    # base.yaml + one YAML per experiment
+│   ├── scripts/                    # download, preprocess, train, evaluate, analyze, export
+│   ├── slurm/                      # Cluster job scripts
+│   ├── results/                    # Per-run metrics and predictions, RESULTS.md
+│   └── figures/                    # Analysis figures
+├── emotion_model/                  # Importable model package (labels, audio, prosody, model, losses, metrics)
+├── emotion_deploy/                 # Exported ONNX model + tokenizer (Git LFS)
+│
 ├── go.sh                           # The one command: update -> check -> record -> bundle logs
 ├── run_pipeline.sh                 # Transcribe -> extract features -> train baseline, one command
 ├── pack.sh                         # Clean tarball for copying to the Jetson
-├── CLAUDE.md                       # Engineering context, verified facts, debugging playbook
 └── README.md
 ```
 
@@ -217,10 +326,7 @@ Emote/
 
 ### Prerequisites
 
-- **Jetson Orin Nano** with JetPack 6 (L4T R36.x), CUDA 12.x, Python 3.10 — for the live transcriber.
-- Any Linux machine with Python 3.10+ — for feature extraction.
-- A **USB microphone**.
-- Internet access for the install only.
+See [System Requirements](#-system-requirements).
 
 ### First run on a new machine
 
@@ -532,9 +638,10 @@ memory pressure, kernel messages, and which `libctranslate2` the Python package 
 - [x] Unsupervised baseline with silhouette scoring.
 - [ ] 🏷 Collect labelled sessions — self-report per session or per utterance.
 - [ ] 📈 Supervised baseline on the per-speaker-normalised feature table, replacing k-means.
-- [x] 🧪 Training pipeline: WavLM audio + transcript + prosody towers, gated fusion, 10-experiment suite, analysis figures, ONNX export ([pipeline/](pipeline/README.md)); smoke-tested, awaiting a GPU.
-- [ ] 🤖 Train it on RAVDESS, CREMA-D, TESS, MELD (+ IEMOCAP, MSP-Podcast once licensed) — [NEXT_STEPS.md](NEXT_STEPS.md).
-- [x] 🔤 Fuse acoustic and lexical models using the transcript text (built; to be trained).
+- [x] 🧪 Training pipeline: WavLM audio + transcript + prosody towers, gated fusion, 10-experiment suite, analysis figures, ONNX export ([pipeline/](pipeline/README.md)); trained on a GPU cluster.
+- [x] 🤖 Train it on RAVDESS, CREMA-D, TESS, MELD — 3 seeds per experiment ([results](pipeline/results/RESULTS.md)).
+- [ ] 🗂 Add IEMOCAP and MSP-Podcast once licensed.
+- [x] 🔤 Fuse acoustic and lexical models using the transcript text.
 - [x] 🎯 Report categories as probabilities so overlapping states stay visible (`emotions.jsonl`).
 - [x] 🗜 Compress and quantise the model for inference on the Orin Nano (int8 ONNX export, parity-checked).
 - [ ] 📡 Live emotion readout during a session, not just offline.
@@ -571,13 +678,12 @@ Shell scripts should pass `bash -n`, Python changes should keep the unit tests g
 
 ## 🐛 Known Issues
 
-- **No full Jetson run has been observed yet.** The installer completes end to end on the device, but the live microphone path, GPU transcription, and session output are still unverified on hardware.
 - `sounddevice` cannot import without PortAudio, so the live path does not run on machines lacking it — use `run.sh --wav` there.
 - The hallucination filter thresholds are untested against real noisy speech and will need tuning from collected sessions.
 - The CUDA CTranslate2 build takes 30–45 minutes on an Orin Nano from cold, and can be OOM-killed at high job counts — use `--ct2-jobs 2`.
 - **CUDA can run out of memory on the Orin.** The GPU shares system RAM, so a browser or IDE left open can leave too little for the model: `CUDA failed with error out of memory`. Close what you can, check `tegrastats`, or use a smaller `model.name`. The transcriber falls back to the CPU automatically.
 - Virtualenv creation fails on some network shares (symlink I/O errors); create the venv on local disk.
-- **There is no emotion model yet.** Stage 2 produces features and an unsupervised baseline; no labels have been collected.
+- **The emotion model is trained on acted corpora.** It has not been validated on labelled recordings of the target speaker; treat its labels on Jetson sessions as indicative.
 
 ---
 

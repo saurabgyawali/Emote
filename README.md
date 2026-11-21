@@ -718,6 +718,20 @@ Shell scripts should pass `bash -n`, Python changes should keep the unit tests g
 
 ## 📜 License
 
+The **code** is MIT-licensed (below). The **trained model files** in `emotion_deploy/` are not
+covered by that licence: they are derived from emotion corpora with their own terms, so use them
+for non-commercial research only and cite the corpora.
+
+| Corpus used to train the shipped model | Licence |
+|---|---|
+| RAVDESS | CC BY-NC-SA 4.0 |
+| CREMA-D | Open Database License (ODbL) |
+| TESS | CC BY-NC 4.0 |
+| MELD | GPL-3.0 |
+
+The corpora themselves are not in this repository; `pipeline/` downloads them from their
+sources. Details and links: [`pipeline/datasets.yaml`](pipeline/datasets.yaml).
+
 ```text
 MIT License
 
